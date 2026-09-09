@@ -100,7 +100,7 @@ case "$RENDER" in *"no ship tasks"*) pass "live herdr: empty home renders idle" 
 printf 'kind=ship\nworktree=/tmp\nbackend=tmux\nharness=claude\n' > "$HOME_DIR/state/e2e-task.meta"
 RENDER2=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-nm-herdr-monitor.sh" render --state-dir "$HOME_DIR/state" 2>&1) \
   || fail "re-render failed"
-case "$RENDER2" in *"e2e-task | idle"*) pass "live herdr: a future run appears on the next render" ;; *) fail "new task hidden: $RENDER2" ;; esac
+case "$RENDER2" in *"e2e-task | unknown"*) pass "live herdr: a future run appears on the next render" ;; *) fail "new task hidden: $RENDER2" ;; esac
 
 # Status names the recorded endpoint.
 STATUS=$(FM_HOME="$HOME_DIR" HERDR_SESSION="$HERDR_LAB_SESSION" PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" \

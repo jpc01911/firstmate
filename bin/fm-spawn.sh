@@ -95,8 +95,9 @@
 #   duplicate-agent risk is independently absent. Treehouse allocation and task
 #   metadata are unchanged. A successful Herdr ship or scout spawn then
 #   best-effort converges this home's display-only No-Mistakes monitor tab
-#   (bin/fm-nm-herdr-monitor.sh owns that contract); a monitor failure never
-#   blocks the spawn.
+#   (bin/fm-nm-herdr-monitor.sh owns that contract); that call is hard-bounded
+#   through bin/fm-timeout-lib.sh, so neither a monitor failure nor a hung
+#   Herdr read can block the spawn.
 #   A clean projected create or exact resume makes one bounded attempt to hold
 #   the one session-scoped presentation-order lock (keyed by named session plus
 #   canonical socket, outside any home's state/) through launch handoff. Lock
@@ -4054,6 +4055,12 @@ echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW
 # Fail-open by design (bin/fm-nm-herdr-monitor.sh owns the contract) - a
 # monitor failure never blocks the spawn above, and non-Herdr homes are
 # untouched because the monitor adopts the home workspace but never creates it.
+# The convergence is hard-bounded through the repo's single bounded-execution
+# owner: a Herdr server that accepts the connection but never answers would
+# otherwise hold this already-delivered spawn open indefinitely.
 if [ "$BACKEND" = herdr ] && [ "$KIND" != secondmate ]; then
-  FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-nm-herdr-monitor.sh" ensure >/dev/null 2>&1 || true
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$SCRIPT_DIR/fm-timeout-lib.sh"
+  fm_run_timed 30 env FM_HOME="$FM_HOME" \
+    "$FM_ROOT/bin/fm-nm-herdr-monitor.sh" ensure >/dev/null 2>&1 || true
 fi

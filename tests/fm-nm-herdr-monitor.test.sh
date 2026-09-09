@@ -69,7 +69,7 @@ case "$1" in
   c-failed) echo "state: failed · source: run-step · run failed" ;;
   d-ci) echo "state: done · source: run-step · checks green: PR ready for review" ;;
   e-done) echo "state: done · source: run-step · run completed" ;;
-  f-idle) echo "state: unknown · source: none · no current-state source available" ;;
+  f-unknown) echo "state: unknown · source: none · daemon socket down despite attributed run record" ;;
   g-blocked) echo "state: blocked · source: status-log · waiting on approver" ;;
   h-paused) echo "state: paused · source: status-log · upstream release window" ;;
   *) echo "state: unknown · source: none · no current-state source available" ;;
@@ -90,7 +90,7 @@ add_ship() {
 # --- render: all six required views plus blocked/paused, none hidden ---------
 home1="$TMP_ROOT/home1"
 make_home "$home1"
-for t in a-active b-gate c-failed d-ci e-done f-idle g-blocked h-paused; do
+for t in a-active b-gate c-failed d-ci e-done f-unknown g-blocked h-paused; do
   add_ship "$home1" "$t"
 done
 printf 'kind=scout\nworktree=/tmp\n' > "$home1/state/scout1.meta"
@@ -98,7 +98,7 @@ write_stub_crew_state
 out=$(FM_HOME="$home1" FM_NM_MONITOR_CREW_STATE="$FAKEBIN/stub-crew-state.sh" \
   "$MON" render --state-dir "$home1/state" 2>&1) || fail "render failed: $out"
 for want in "a-active | active" "b-gate | gate-waiting" "c-failed | failed" \
-  "d-ci | CI-ready" "e-done | completed" "f-idle | idle" \
+  "d-ci | CI-ready" "e-done | completed" "f-unknown | unknown" \
   "g-blocked | blocked" "h-paused | paused"; do
   case "$out" in *"$want"*) pass "render shows $want" ;; *) fail "render missing $want: $out" ;; esac
 done
@@ -115,7 +115,8 @@ case "$out" in *"idle | no ship tasks"*) pass "empty home renders idle" ;; *) fa
 add_ship "$home1" "z-new"
 out=$(FM_HOME="$home1" FM_NM_MONITOR_CREW_STATE="$FAKEBIN/stub-crew-state.sh" \
   "$MON" render --state-dir "$home1/state" 2>&1) || fail "re-render failed"
-case "$out" in *"z-new | idle"*) pass "a new task appears on the next render" ;; *) fail "new task hidden: $out" ;; esac
+case "$out" in *"z-new | unknown"*) pass "a new task appears on the next render" ;; *) fail "new task hidden: $out" ;; esac
+case "$out" in *"f-unknown | idle"*) fail "an unknown state was mislabeled idle: $out" ;; *) pass "unknown never reads as idle" ;; esac
 
 # --- read-only pipeline proof: real crew-state, recording fake no-mistakes ----
 home_ro="$TMP_ROOT/homero"
@@ -278,3 +279,14 @@ case "$(cat "$home5/state/.nm-monitor")" in
   lab*) pass "secondmate record binds its own session" ;;
   *) fail "secondmate record wrong: $(cat "$home5/state/.nm-monitor")" ;;
 esac
+
+# --- option parsing: a flag with no value fails fast, never spins -------------
+for bad in "ensure --interval" "render --state-dir"; do
+  # shellcheck disable=SC2086
+  out=$(FM_HOME="$home_empty" timeout 10 "$MON" $bad 2>&1); rc=$?
+  [ "$rc" -ne 124 ] || fail "$bad hung instead of rejecting the missing value"
+  [ "$rc" -ne 0 ] || fail "$bad accepted a missing value"
+  case "$out" in *"requires a value"*) pass "$bad is rejected with a usage error" ;;
+    *) fail "$bad gave no usage error: $out" ;;
+  esac
+done
