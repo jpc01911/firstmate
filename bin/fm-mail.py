@@ -9,7 +9,9 @@
 #                          plus a retry-set of previously unfetchable uids;
 #                          persists the retry-scan position and cap-1 turn flag.
 #   seen <cursor>          Print a cursor file (used by `status`).
-#   ack <uid>              Mark one handled message read (UID STORE \Seen).
+#   ack <uidvalidity>/<uid>
+#                          Mark one handled message read (UID STORE \Seen),
+#                          bound to the generation it was surfaced under.
 #
 # All configuration arrives through the environment, never through arguments,
 # so credentials never appear in argv or logs. read/poll use BODY.PEEK so mail
