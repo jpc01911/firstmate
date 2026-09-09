@@ -9,10 +9,12 @@
 #                          plus a retry-set of previously unfetchable uids;
 #                          persists the retry-scan position and cap-1 turn flag.
 #   seen <cursor>          Print a cursor file (used by `status`).
+#   ack <uid>              Mark one handled message read (UID STORE \Seen).
 #
 # All configuration arrives through the environment, never through arguments,
 # so credentials never appear in argv or logs. read/poll use BODY.PEEK so mail
-# is never marked seen before firstmate answers it.
+# is never marked seen before firstmate answers it; only ack adds \Seen, for
+# one handled UID after its work is done.
 import imaplib
 import os
 import re
@@ -472,10 +474,53 @@ def cmd_poll_list():
                 pass
 
 
+def cmd_ack(uid):
+    # Mark one handled message read by adding \Seen to its exact immutable
+    # IMAP UID. This is the only path that changes read state: poll and read
+    # use BODY.PEEK and never STORE, so a newly surfaced message stays unread
+    # while its work is pending. STORE +FLAGS is naturally idempotent, so a
+    # repeated completion re-issues the same flag and still succeeds. The
+    # mailbox generation (UIDVALIDITY) is checked against the cursor before
+    # the STORE, so a recreated mailbox can never have a reused numeric uid
+    # marked read. Any failure is loud and changes nothing, so an unhandled
+    # message stays unread instead of being silently lost.
+    if not re.fullmatch(r'[0-9]+', uid or ''):
+        print('fm-mail ack error: ack needs a numeric IMAP UID')
+        return 1
+    stored_gen, _ = load_cursor(os.environ.get('FM_MAIL_CURSOR', ''))
+    m = None
+    try:
+        m = connect_mailbox()
+        m.select('INBOX')
+        ur = m.untagged_responses.get('UIDVALIDITY')
+        uidv = clean(ur[-1].decode()) if ur else ''
+        if stored_gen and uidv and stored_gen != uidv:
+            print('fm-mail ack error: mailbox generation changed '
+                  '(uidvalidity mismatch); refusing to mark uid %s read' % uid)
+            return 1
+        typ, _ = m.uid('store', uid.encode(), '+FLAGS', '(\\Seen)')
+        if typ != 'OK':
+            print('fm-mail ack error: server refused to mark uid %s read' % uid)
+            return 1
+    except Exception as e:
+        print('fm-mail ack error:', e)
+        return 1
+    finally:
+        if m is not None:
+            try:
+                m.logout()
+            except Exception:
+                pass
+    print('acked %s' % uid)
+    return 0
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ''
     if cmd == 'read':
         return cmd_read()
+    if cmd == 'ack':
+        return cmd_ack(sys.argv[2] if len(sys.argv) > 2 else '')
     if cmd == 'send':
         if len(sys.argv) < 5:
             return 1

@@ -29,6 +29,18 @@
 #                        `at`/cron, or via the standing check armed by
 #                        bin/fm-mail-check.sh (docs/configuration.md
 #                        "Mail plane").
+#   ack <uid>            Mark one handled message read (UID STORE \Seen) after
+#                        its requested work is done. This is the only path that
+#                        changes read state: poll and read never mark mail read,
+#                        so a surfaced message stays unread while its work is
+#                        pending. The STORE targets the exact immutable UID and
+#                        is refused when the live mailbox generation no longer
+#                        matches the cursor, so a recreated mailbox can never
+#                        have a reused numeric uid marked read. Repeating ack
+#                        for an already-read uid still succeeds, and any
+#                        connection or server failure is loud and changes
+#                        nothing, so an unhandled message stays unread instead
+#                        of being silently lost.
 #   status               Print configuration and the last poll cursor. No
 #                        network, no wake.
 #
@@ -59,7 +71,8 @@
 #
 # IMAP/SMTP work is delegated to bin/fm-mail.py (imaplib/smtplib, implicit TLS
 # on 993/465). STARTTLS and port 587 are not supported. BODY.PEEK is used on
-# read/poll so mail is never marked seen before firstmate actually answers it.
+# read/poll so mail is never marked seen before firstmate actually answers it;
+# only ack adds \Seen, for one handled UID after its work is done.
 
 set -euo pipefail
 
@@ -183,6 +196,7 @@ usage() {
 fm-mail.sh read
 fm-mail.sh send <to> <subject> <body | ->
 fm-mail.sh poll
+fm-mail.sh ack <uid>
 fm-mail.sh status
 EOF
 }
@@ -640,6 +654,17 @@ case "${1:-}" in
     ;;
   poll)
     mail_poll
+    ;;
+  ack)
+    uid="${2:-}"
+    case "$uid" in
+      ''|*[!0-9]*)
+        echo "fm-mail: ack needs a numeric IMAP UID" >&2
+        usage >&2
+        exit 1
+        ;;
+    esac
+    run_py ack "$uid"
     ;;
   -h|--help)
     usage

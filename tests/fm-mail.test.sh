@@ -2600,6 +2600,308 @@ SH
   pass "fm-mail: bounded fetch makes progress through a large backlog without re-surfacing mail"
 }
 
+test_ack_marks_exact_uid_seen() {
+  local harness out rc=0 log
+  harness="$TMP_ROOT/ack-harness.py"
+  log="$TMP_ROOT/ack-calls.log"
+  rm -f "$log"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+})
+LOG = sys.argv[3] if len(sys.argv) > 3 else ''
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if LOG:
+            with open(LOG, 'a', encoding='utf-8') as f:
+                f.write('%s|%r\n' % (cmd, args))
+        if cmd == 'store':
+            return ('OK', [None])
+        return ('NO', None)
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[2])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_ack(sys.argv[4] if len(sys.argv) > 4 else ''))
+PYEOF
+  printf 'uidvalidity=90009\n42\n' > "$HOME_DIR/state/.mail-seen"
+
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" "$log" 42 2>&1) || rc=$?
+  expect_code 0 "$rc" "ack of a handled uid must succeed"
+  assert_contains "$out" "acked 42" "ack reports the marked uid"
+  assert_contains "$(cat "$log" 2>/dev/null)" "store" "ack issues a UID STORE"
+  assert_contains "$(cat "$log" 2>/dev/null)" "'42'" "STORE targets the exact handled uid"
+  assert_contains "$(cat "$log" 2>/dev/null)" "Seen" "STORE adds the Seen flag"
+  pass "fm-mail: ack marks the exact handled uid read"
+}
+
+test_poll_and_read_never_mark_seen() {
+  local harness out rc=0 log
+  harness="$TMP_ROOT/no-store-harness.py"
+  log="$TMP_ROOT/no-store-calls.log"
+  rm -f "$log"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[2],
+    'FM_MAIL_POLL_MAX_WAKES': '5',
+})
+LOG = sys.argv[3] if len(sys.argv) > 3 else ''
+MODE = sys.argv[4] if len(sys.argv) > 4 else 'poll_list'
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if LOG:
+            with open(LOG, 'a', encoding='utf-8') as f:
+                f.write('%s|%r\n' % (cmd, args))
+        if cmd == 'search':
+            return ('OK', [b'5'])
+        if cmd == 'fetch':
+            return ('OK', [(b'', b'From: a@b.c\r\nSubject: hi\r\n\r\nbody line\r\n')])
+        return ('NO', None)
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(getattr(mod, 'cmd_' + MODE)())
+PYEOF
+  printf 'uidvalidity=90009\n' > "$HOME_DIR/state/.mail-seen"
+
+  out=$(python3 "$harness" "$ROOT/bin/fm-mail.py" "$HOME_DIR/state/.mail-seen" "$log" poll_list 2>&1) || rc=$?
+  expect_code 0 "$rc" "poll_list must succeed"
+  out=$(python3 "$harness" "$ROOT/bin/fm-mail.py" "$HOME_DIR/state/.mail-seen" "$log" read 2>&1) || rc=$?
+  expect_code 0 "$rc" "read must succeed"
+  assert_not_contains "$(cat "$log" 2>/dev/null)" "store" "neither poll nor read ever issues STORE"
+  assert_contains "$(cat "$log" 2>/dev/null)" "BODY.PEEK" "fetches stay peek-only so pending mail remains unread"
+  pass "fm-mail: poll and read never change read state"
+}
+
+test_ack_repeated_completion_idempotent() {
+  local harness out rc=0 rc2=0
+  harness="$TMP_ROOT/ack-repeat-harness.py"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+})
+class FakeConn:
+    # The uid is already Seen from the first completion; the server still
+    # answers OK, so STORE +FLAGS stays a no-op success.
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'store':
+            return ('OK', [None])
+        return ('NO', None)
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[2])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_ack(sys.argv[3] if len(sys.argv) > 3 else ''))
+PYEOF
+  printf 'uidvalidity=90009\n42\n' > "$HOME_DIR/state/.mail-seen"
+
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" 42 2>&1) || rc=$?
+  expect_code 0 "$rc" "first ack must succeed"
+  assert_contains "$out" "acked 42" "first ack reports the marked uid"
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" 42 2>&1) || rc2=$?
+  expect_code 0 "$rc2" "second ack of the same uid must still succeed"
+  assert_contains "$out" "acked 42" "repeated ack reports the marked uid again"
+  pass "fm-mail: repeated ack of one uid is idempotent"
+}
+
+test_ack_refuses_wrong_generation() {
+  local harness out rc=0 log
+  harness="$TMP_ROOT/ack-generation-harness.py"
+  log="$TMP_ROOT/ack-generation-calls.log"
+  rm -f "$log"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+})
+LOG = sys.argv[3] if len(sys.argv) > 3 else ''
+class FakeConn:
+    # Recreated mailbox: the numeric uid may now belong to another message.
+    untagged_responses = {'UIDVALIDITY': [b'22222']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if LOG:
+            with open(LOG, 'a', encoding='utf-8') as f:
+                f.write('%s|%r\n' % (cmd, args))
+        return ('OK', [None])
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[2])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_ack(sys.argv[4] if len(sys.argv) > 4 else ''))
+PYEOF
+  printf 'uidvalidity=11111\n77\n' > "$HOME_DIR/state/.mail-seen"
+
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" "$log" 77 2>&1) || rc=$?
+  expect_code 1 "$rc" "ack under a changed generation must fail"
+  assert_contains "$out" "generation changed" "ack names the generation mismatch"
+  assert_not_contains "$out" "acked" "a refused ack must not report success"
+  assert_not_contains "$(cat "$log" 2>/dev/null)" "store" "a refused ack must never STORE a possibly-reused uid"
+  pass "fm-mail: ack refuses a recreated mailbox generation"
+}
+
+test_ack_fails_closed_on_imap_error() {
+  local harness out rc=0 marker
+  harness="$TMP_ROOT/ack-error-harness.py"
+  marker="$TMP_ROOT/ack-error-logout.marker"
+  rm -f "$marker"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+})
+MODE = sys.argv[3] if len(sys.argv) > 3 else 'refused'
+MARKER = sys.argv[4] if len(sys.argv) > 4 else ''
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        if MODE == 'unreachable':
+            raise OSError('connection refused')
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if cmd == 'store':
+            return ('NO', [b'store failed'])
+        return ('NO', None)
+    def logout(self):
+        if MARKER:
+            open(MARKER, 'w', encoding='utf-8').write('logged-out\n')
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[2])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_ack(sys.argv[5] if len(sys.argv) > 5 else ''))
+PYEOF
+  printf 'uidvalidity=90009\n42\n' > "$HOME_DIR/state/.mail-seen"
+
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" refused "$marker" 42 2>&1) || rc=$?
+  expect_code 1 "$rc" "a refused STORE must fail"
+  assert_contains "$out" "refused to mark uid 42 read" "a refused STORE names the uid it left unread"
+  assert_not_contains "$out" "acked" "a failed ack must not report success"
+  [ -f "$marker" ] || fail "ack must log out after a post-login IMAP error"
+  assert_not_contains "$out" "test-pass" "ack errors never leak a secret"
+
+  rm -f "$marker"
+  rc=0
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" unreachable "$marker" 42 2>&1) || rc=$?
+  expect_code 1 "$rc" "an unreachable server must fail"
+  assert_contains "$out" "connection refused" "a connection failure is reported"
+  assert_not_contains "$out" "acked" "an unreached server must not report success"
+  pass "fm-mail: ack fails closed on IMAP errors and stays unread"
+}
+
+test_ack_bash_plumbing() {
+  local fakebin out rc=0 argv_file
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  argv_file="$TMP_ROOT/ack-argv.txt"
+  rm -f "$argv_file"
+
+  # Fake python3 records its argv (proving the uid travels as an argument,
+  # never bundled with credentials) and succeeds.
+  cat > "$fakebin/python3" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$argv_file"
+exit 0
+SH
+  chmod +x "$fakebin/python3"
+
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=test-pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" ack 42 2>&1) || rc=$?
+  expect_code 0 "$rc" "ack with a numeric uid must succeed"
+  assert_contains "$(cat "$argv_file" 2>/dev/null)" "ack" "ack forwards the subcommand to the engine"
+  assert_contains "$(cat "$argv_file" 2>/dev/null)" "42" "ack forwards the uid to the engine"
+  assert_not_contains "$(cat "$argv_file" 2>/dev/null)" "test-pass" "the uid path never carries the password in argv"
+
+  rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=test-pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" ack 2>&1) || rc=$?
+  expect_code 1 "$rc" "ack without a uid must fail"
+  assert_contains "$out" "numeric IMAP UID" "ack without a uid names the requirement"
+  assert_not_contains "$out" "test-pass" "ack usage errors never leak a secret"
+
+  rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=test-pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" ack '42;EXPUNGE' 2>&1) || rc=$?
+  expect_code 1 "$rc" "ack with a non-numeric uid must fail"
+  assert_contains "$out" "numeric IMAP UID" "ack rejects a non-numeric uid before any IMAP command"
+
+  rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=test-pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" --help 2>&1) || rc=$?
+  expect_code 0 "$rc" "--help must exit 0"
+  assert_contains "$out" "ack" "--help lists the ack subcommand"
+  pass "fm-mail: ack validates its uid, never leaks secrets, and is listed in help"
+}
+
 test_missing_secret_fails_cleanly
 test_env_overrides_env_file
 test_status_without_network
@@ -2657,3 +2959,9 @@ test_body_preview_tolerates_none_payload
 test_read_tolerates_none_payload
 test_read_surfaces_unfetchable_uid
 test_invalid_port_fails_cleanly
+test_ack_marks_exact_uid_seen
+test_poll_and_read_never_mark_seen
+test_ack_repeated_completion_idempotent
+test_ack_refuses_wrong_generation
+test_ack_fails_closed_on_imap_error
+test_ack_bash_plumbing
