@@ -2643,7 +2643,7 @@ sys.exit(mod.cmd_ack(sys.argv[4] if len(sys.argv) > 4 else ''))
 PYEOF
   printf 'uidvalidity=90009\n42\n' > "$HOME_DIR/state/.mail-seen"
 
-  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" "$log" 42 2>&1) || rc=$?
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" "$log" 90009/42 2>&1) || rc=$?
   expect_code 0 "$rc" "ack of a handled uid must succeed"
   assert_contains "$out" "acked 42" "ack reports the marked uid"
   assert_contains "$(cat "$log" 2>/dev/null)" "store" "ack issues a UID STORE"
@@ -2749,7 +2749,7 @@ sys.exit(mod.cmd_ack(sys.argv[4] if len(sys.argv) > 4 else ''))
 PYEOF
   printf 'uidvalidity=90009\n42\n' > "$HOME_DIR/state/.mail-seen"
 
-  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" "$log" 999 2>&1) || rc=$?
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" "$log" 90009/999 2>&1) || rc=$?
   expect_code 1 "$rc" "ack of a uid the mailbox does not hold must fail"
   assert_contains "$out" "not in the mailbox" "ack names the uid it could not mark read"
   assert_not_contains "$out" "acked" "an unmatched uid must never report success"
@@ -2796,10 +2796,10 @@ sys.exit(mod.cmd_ack(sys.argv[3] if len(sys.argv) > 3 else ''))
 PYEOF
   printf 'uidvalidity=90009\n42\n' > "$HOME_DIR/state/.mail-seen"
 
-  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" 42 2>&1) || rc=$?
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" 90009/42 2>&1) || rc=$?
   expect_code 0 "$rc" "first ack must succeed"
   assert_contains "$out" "acked 42" "first ack reports the marked uid"
-  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" 42 2>&1) || rc2=$?
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" 90009/42 2>&1) || rc2=$?
   expect_code 0 "$rc2" "second ack of the same uid must still succeed"
   assert_contains "$out" "acked 42" "repeated ack reports the marked uid again"
   pass "fm-mail: repeated ack of one uid is idempotent"
@@ -2845,9 +2845,9 @@ sys.exit(mod.cmd_ack(sys.argv[4] if len(sys.argv) > 4 else ''))
 PYEOF
   printf 'uidvalidity=11111\n77\n' > "$HOME_DIR/state/.mail-seen"
 
-  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" "$log" 77 2>&1) || rc=$?
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" "$log" 11111/77 2>&1) || rc=$?
   expect_code 1 "$rc" "ack under a changed generation must fail"
-  assert_contains "$out" "generation changed" "ack names the generation mismatch"
+  assert_contains "$out" "surfaced under 11111, now 22222" "ack names the generation the uid was surfaced under and the live one"
   assert_not_contains "$out" "acked" "a refused ack must not report success"
   assert_not_contains "$(cat "$log" 2>/dev/null)" "store" "a refused ack must never STORE a possibly-reused uid"
   pass "fm-mail: ack refuses a recreated mailbox generation"
@@ -2896,7 +2896,7 @@ sys.exit(mod.cmd_ack(sys.argv[5] if len(sys.argv) > 5 else ''))
 PYEOF
   printf 'uidvalidity=90009\n42\n' > "$HOME_DIR/state/.mail-seen"
 
-  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" refused "$marker" 42 2>&1) || rc=$?
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" refused "$marker" 90009/42 2>&1) || rc=$?
   expect_code 1 "$rc" "a refused STORE must fail"
   assert_contains "$out" "refused to mark uid 42 read" "a refused STORE names the uid it left unread"
   assert_not_contains "$out" "acked" "a failed ack must not report success"
@@ -2905,11 +2905,104 @@ PYEOF
 
   rm -f "$marker"
   rc=0
-  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" unreachable "$marker" 42 2>&1) || rc=$?
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" unreachable "$marker" 90009/42 2>&1) || rc=$?
   expect_code 1 "$rc" "an unreachable server must fail"
   assert_contains "$out" "connection refused" "a connection failure is reported"
   assert_not_contains "$out" "acked" "an unreached server must not report success"
   pass "fm-mail: ack fails closed on IMAP errors and stays unread"
+}
+
+test_wake_publishes_runnable_generation_bound_ack() {
+  # The wake payload is the agent-facing interface that makes handled mail get
+  # marked read, so the published ack command must be runnable as printed and
+  # must carry the generation the uid was surfaced under.
+  local fakebin homedir_bin wake_home out rc=0 ack_cmd ack_log
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  wake_home="$TMP_ROOT/ack-invocation-home"
+  homedir_bin="$wake_home/bin"
+  ack_log="$TMP_ROOT/wake-ack-token.txt"
+  rm -f "$ack_log"
+  mkdir -p "$homedir_bin" "$wake_home/state"
+  [ -e "$homedir_bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$homedir_bin/fm-wake-lib.sh"
+
+  cat > "$fakebin/python3" <<SH
+#!/usr/bin/env bash
+if [ "\$2" = ack ]; then
+  printf '%s\n' "\$3" > "$ack_log"
+  exit 0
+fi
+printf 'uidvalidity\t60006\n'
+printf '99\t2026-09-05T00:00:00Z\talice@example.com\tHello\n'
+SH
+  chmod +x "$fakebin/python3"
+
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$wake_home" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "poll must succeed"
+  assert_contains "$(cat "$wake_home/state/.wake-queue" 2>/dev/null)" "check: mail 99" "poll queues the mail wake"
+
+  ack_cmd=$(grep -o 'bin/fm-mail.sh ack [0-9]*/[0-9]*' "$wake_home/state/.wake-queue" | tail -n 1)
+  [ -n "$ack_cmd" ] || fail "the mail wake published no ack command for the handler to run"
+
+  rc=0
+  out=$(cd "$ROOT" && FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$wake_home" PATH="$fakebin:$PATH" bash -c "$ack_cmd" 2>&1) || rc=$?
+  expect_code 0 "$rc" "the published ack command must run as printed: $out"
+  assert_equals "60006/99" "$(cat "$ack_log" 2>/dev/null)" \
+    "the published ack must reach the engine bound to the generation the uid was surfaced under"
+  pass "fm-mail: a mail wake publishes a runnable generation-bound ack command"
+}
+
+test_ack_refuses_a_mailbox_with_no_generation() {
+  local harness out rc=0 log
+  harness="$TMP_ROOT/ack-nogen-harness.py"
+  log="$TMP_ROOT/ack-nogen-calls.log"
+  rm -f "$log"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+})
+LOG = sys.argv[3] if len(sys.argv) > 3 else ''
+class FakeConn:
+    # The mailbox reports no generation, so nothing can bind the uid to the
+    # mailbox it was surfaced under.
+    untagged_responses = {}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if LOG:
+            with open(LOG, 'a', encoding='utf-8') as f:
+                f.write('%s|%r\n' % (cmd, args))
+        if cmd == 'search':
+            return ('OK', [b'42'])
+        return ('OK', [None])
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[2])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_ack(sys.argv[4] if len(sys.argv) > 4 else ''))
+PYEOF
+  printf 'uidvalidity=90009\n42\n' > "$HOME_DIR/state/.mail-seen"
+
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" "$log" 90009/42 2>&1) || rc=$?
+  expect_code 1 "$rc" "ack against a mailbox reporting no generation must fail"
+  assert_contains "$out" "no generation" "ack names the missing generation evidence"
+  assert_not_contains "$out" "acked" "a refused ack must not report success"
+  assert_not_contains "$(cat "$log" 2>/dev/null)" "store" "missing generation evidence must never reach STORE"
+  pass "fm-mail: ack refuses a mailbox that reports no generation"
 }
 
 test_ack_bash_plumbing() {
@@ -2929,26 +3022,35 @@ SH
 
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=test-pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
     FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
-    "$MAIL" ack 42 2>&1) || rc=$?
-  expect_code 0 "$rc" "ack with a numeric uid must succeed"
+    "$MAIL" ack 90009/42 2>&1) || rc=$?
+  expect_code 0 "$rc" "ack with a generation-bound token must succeed"
   assert_contains "$(cat "$argv_file" 2>/dev/null)" "ack" "ack forwards the subcommand to the engine"
-  assert_contains "$(cat "$argv_file" 2>/dev/null)" "42" "ack forwards the uid to the engine"
+  assert_contains "$(cat "$argv_file" 2>/dev/null)" "90009/42" "ack forwards the generation-bound token to the engine"
   assert_not_contains "$(cat "$argv_file" 2>/dev/null)" "test-pass" "the uid path never carries the password in argv"
 
   rc=0
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=test-pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
     FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
     "$MAIL" ack 2>&1) || rc=$?
-  expect_code 1 "$rc" "ack without a uid must fail"
-  assert_contains "$out" "numeric IMAP UID" "ack without a uid names the requirement"
+  expect_code 1 "$rc" "ack without a token must fail"
+  assert_contains "$out" "<uidvalidity>/<uid>" "ack without a token names the requirement"
   assert_not_contains "$out" "test-pass" "ack usage errors never leak a secret"
+
+  rc=0
+  rm -f "$argv_file"
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=test-pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
+    "$MAIL" ack 42 2>&1) || rc=$?
+  expect_code 1 "$rc" "a bare uid carries no generation evidence and must fail"
+  assert_contains "$out" "<uidvalidity>/<uid>" "a bare uid names the generation requirement"
+  [ ! -s "$argv_file" ] || fail "a bare uid must never reach the engine"
 
   rc=0
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=test-pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
     FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
-    "$MAIL" ack '42;EXPUNGE' 2>&1) || rc=$?
+    "$MAIL" ack '90009/42;EXPUNGE' 2>&1) || rc=$?
   expect_code 1 "$rc" "ack with a non-numeric uid must fail"
-  assert_contains "$out" "numeric IMAP UID" "ack rejects a non-numeric uid before any IMAP command"
+  assert_contains "$out" "<uidvalidity>/<uid>" "ack rejects a non-numeric uid before any IMAP command"
 
   rc=0
   out=$(FM_MAIL_USER=test FM_MAIL_PASS=test-pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
@@ -2956,7 +3058,7 @@ SH
     "$MAIL" --help 2>&1) || rc=$?
   expect_code 0 "$rc" "--help must exit 0"
   assert_contains "$out" "ack" "--help lists the ack subcommand"
-  pass "fm-mail: ack validates its uid, never leaks secrets, and is listed in help"
+  pass "fm-mail: ack validates its generation-bound token, never leaks secrets, and is listed in help"
 }
 
 test_missing_secret_fails_cleanly
@@ -3022,4 +3124,6 @@ test_ack_missing_uid_fails_without_claiming_success
 test_ack_repeated_completion_idempotent
 test_ack_refuses_wrong_generation
 test_ack_fails_closed_on_imap_error
+test_wake_publishes_runnable_generation_bound_ack
+test_ack_refuses_a_mailbox_with_no_generation
 test_ack_bash_plumbing

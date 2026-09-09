@@ -29,18 +29,20 @@
 #                        `at`/cron, or via the standing check armed by
 #                        bin/fm-mail-check.sh (docs/configuration.md
 #                        "Mail plane").
-#   ack <uid>            Mark one handled message read (UID STORE \Seen) after
+#   ack <uidvalidity>/<uid>
+#                        Mark one handled message read (UID STORE \Seen) after
 #                        its requested work is done. This is the only path that
 #                        changes read state: poll and read never mark mail read,
 #                        so a surfaced message stays unread while its work is
-#                        pending. The STORE targets the exact immutable UID and
-#                        is refused when the live mailbox generation no longer
-#                        matches the cursor, so a recreated mailbox can never
-#                        have a reused numeric uid marked read. Repeating ack
-#                        for an already-read uid still succeeds, and any
-#                        connection or server failure is loud and changes
-#                        nothing, so an unhandled message stays unread instead
-#                        of being silently lost.
+#                        pending. The argument is the generation-bound token
+#                        the wake published; the STORE targets that exact
+#                        immutable UID and is refused when the live mailbox
+#                        reports a different generation or none at all, so a
+#                        recreated mailbox can never have a reused numeric uid
+#                        marked read. Repeating ack for an already-read uid
+#                        still succeeds, and any connection or server failure
+#                        is loud and changes nothing, so an unhandled message
+#                        stays unread instead of being silently lost.
 #   status               Print configuration and the last poll cursor. No
 #                        network, no wake.
 #
@@ -196,7 +198,7 @@ usage() {
 fm-mail.sh read
 fm-mail.sh send <to> <subject> <body | ->
 fm-mail.sh poll
-fm-mail.sh ack <uid>
+fm-mail.sh ack <uidvalidity>/<uid>
 fm-mail.sh status
 EOF
 }
@@ -377,10 +379,14 @@ wake_for() {
   #   3 - the wake row was never appended; nothing was delivered.
   #   4 - the wake was delivered but the optional retry-id cleanup failed.
   local generation=$1 id=$2 summary=$3 retry_id=${4:-} lib="$SCRIPT_DIR/fm-wake-lib.sh" status=0 tag=""
-  local wake_key="mail:$id"
+  local wake_key="mail:$id" ack_hint=""
   [ -n "$retry_id" ] && tag=retry
+  # The ack instruction travels in the wake payload carrying the generation
+  # the uid was surfaced under, so handling the wake is what marks the message
+  # read and a uid from an earlier mailbox can never be acked into a new one.
   if [ -n "$generation" ]; then
     wake_key="mail:$generation/$id"
+    ack_hint=" - when handled: bin/fm-mail.sh ack $generation/$id"
   fi
   if [ ! -f "$lib" ]; then
     echo "fm-mail: $lib missing; cannot wake" >&2
@@ -390,7 +396,7 @@ wake_for() {
   # shellcheck disable=SC1091
   . "$lib"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-  if fm_wake_append_locked check "$wake_key" "check: mail $id - $summary"; then
+  if fm_wake_append_locked check "$wake_key" "check: mail $id - $summary$ack_hint"; then
     if mail_record_evidence "$generation" "$id" "$tag"; then
       :
     elif mail_rollback_wake_locked "$wake_key" "$generation" "$id"; then
@@ -656,15 +662,22 @@ case "${1:-}" in
     mail_poll
     ;;
   ack)
-    uid="${2:-}"
-    case "$uid" in
+    token="${2:-}"
+    ack_gen="${token%%/*}"
+    ack_uid="${token#*/}"
+    case "$token" in
+      */*) ;;
+      *) ack_gen=""; ack_uid="" ;;
+    esac
+    case "$ack_gen" in ''|*[!0-9]*) ack_uid="" ;; esac
+    case "$ack_uid" in
       ''|*[!0-9]*)
-        echo "fm-mail: ack needs a numeric IMAP UID" >&2
+        echo "fm-mail: ack needs the generation-bound <uidvalidity>/<uid> token published with the mail wake" >&2
         usage >&2
         exit 1
         ;;
     esac
-    run_py ack "$uid"
+    run_py ack "$token"
     ;;
   -h|--help)
     usage

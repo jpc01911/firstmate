@@ -566,8 +566,9 @@ FM_SMTP_HOST=   # SMTP server hostname
 The per-poll wake cap bounds the wakes of one `poll` run; header fetches scan a larger bounded window of new unseen uids plus already-surfaced retry-set uids, so a flood or large backlog still makes bounded progress every poll, keeping the durable wake queue bounded without ever dropping mail.
 A message whose header cannot be fetched is surfaced with a degraded summary instead of being skipped, so it is never missed and cannot block later mail.
 A later poll retries that fetch and, on success, surfaces the real sender and subject; a persistently unfetchable message stays degraded without repeating that wake.
-After firstmate handles a surfaced message, it runs `bin/fm-mail.sh ack <uid>` to mark that exact UID read (`UID STORE \Seen`); `poll` and `read` never mark mail read, so a message stays unread while its work is pending and handled mail stops appearing as unseen on later checks.
-Repeated `ack` for one UID still succeeds, while a changed mailbox generation (UIDVALIDITY) refuses the STORE so a reused numeric UID in a recreated mailbox is never marked read.
+Each mail wake payload carries the exact acknowledgement command for that message, `bin/fm-mail.sh ack <uidvalidity>/<uid>`, and AGENTS.md's `check:` handling rule requires running it once the requested task is handled; it marks that exact UID read (`UID STORE \Seen`).
+`poll` and `read` never mark mail read, so a message stays unread while its work is pending and handled mail stops appearing as unseen on later checks.
+Repeated `ack` for one UID still succeeds, while a token whose generation does not match the live mailbox, or a mailbox reporting no generation at all, refuses the STORE so a reused numeric UID in a recreated mailbox is never marked read.
 A failed `ack` is loud and changes nothing, so an unhandled message stays unread instead of being silently lost.
 The `ack` path uses the same `.env`/IMAP contract as `poll` with no harness interaction, so durable mail handling never depends on the active session.
 

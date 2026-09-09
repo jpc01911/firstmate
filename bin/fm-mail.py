@@ -474,32 +474,41 @@ def cmd_poll_list():
                 pass
 
 
-def cmd_ack(uid):
-    # Mark one handled message read by adding \Seen to its exact immutable
-    # IMAP UID. This is the only path that changes read state: poll and read
-    # use BODY.PEEK and never STORE, so a newly surfaced message stays unread
-    # while its work is pending. STORE +FLAGS is naturally idempotent, so a
-    # repeated completion re-issues the same flag and still succeeds. The
-    # mailbox generation (UIDVALIDITY) is checked against the cursor before
-    # the STORE, so a recreated mailbox can never have a reused numeric uid
-    # marked read. The uid is confirmed present with a UID SEARCH first,
-    # because a STORE naming no message still succeeds and would report a
-    # still-unread message as handled. Any failure is loud and changes
-    # nothing, so an unhandled message stays unread instead of being
-    # silently lost.
-    if not re.fullmatch(r'[0-9]+', uid or ''):
-        print('fm-mail ack error: ack needs a numeric IMAP UID')
+def cmd_ack(token):
+    # Mark one handled message read by adding \Seen to the exact immutable
+    # IMAP UID that was surfaced. This is the only path that changes read
+    # state: poll and read use BODY.PEEK and never STORE, so a newly surfaced
+    # message stays unread while its work is pending. STORE +FLAGS is
+    # naturally idempotent, so a repeated completion re-issues the same flag
+    # and still succeeds. The ack argument is the generation-bound
+    # <uidvalidity>/<uid> token the wake published, and it is checked against
+    # the live mailbox generation, so a uid surfaced under an earlier mailbox
+    # can never mark a reused number read; a mailbox that reports no
+    # generation is refused for the same reason. The uid is then confirmed
+    # present with a UID SEARCH, because a STORE naming no message still
+    # succeeds and would report a still-unread message as handled. Any
+    # failure is loud and changes nothing, so an unhandled message stays
+    # unread instead of being silently lost.
+    parts = re.fullmatch(r'([0-9]+)/([0-9]+)', token or '')
+    if not parts:
+        print('fm-mail ack error: ack needs the generation-bound '
+              '<uidvalidity>/<uid> token published with the mail wake')
         return 1
-    stored_gen, _ = load_cursor(os.environ.get('FM_MAIL_CURSOR', ''))
+    gen, uid = parts.group(1), parts.group(2)
     m = None
     try:
         m = connect_mailbox()
         m.select('INBOX')
         ur = m.untagged_responses.get('UIDVALIDITY')
         uidv = clean(ur[-1].decode()) if ur else ''
-        if stored_gen and uidv and stored_gen != uidv:
-            print('fm-mail ack error: mailbox generation changed '
-                  '(uidvalidity mismatch); refusing to mark uid %s read' % uid)
+        if not uidv:
+            print('fm-mail ack error: mailbox reported no generation '
+                  '(uidvalidity); refusing to mark uid %s read' % uid)
+            return 1
+        if uidv != gen:
+            print('fm-mail ack error: mailbox generation changed (surfaced '
+                  'under %s, now %s); refusing to mark uid %s read'
+                  % (gen, uidv, uid))
             return 1
         typ, data = m.uid('search', None, 'UID', uid)
         if typ != 'OK':
