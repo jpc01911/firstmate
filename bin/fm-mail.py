@@ -497,6 +497,12 @@ def cmd_ack(token):
               '<uidvalidity>/<uid> token published with the mail wake')
         return 1
     gen, uid = parts.group(1), parts.group(2)
+    stored_gen, surfaced = load_cursor(os.environ.get('FM_MAIL_CURSOR', ''))
+    if stored_gen != gen or uid not in surfaced:
+        print('fm-mail ack error: uid %s was not durably surfaced by this '
+              'home under mailbox generation %s; nothing was marked read'
+              % (uid, gen))
+        return 1
     m = None
     try:
         m = connect_mailbox()

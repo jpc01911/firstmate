@@ -2747,7 +2747,7 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 sys.exit(mod.cmd_ack(sys.argv[4] if len(sys.argv) > 4 else ''))
 PYEOF
-  printf 'uidvalidity=90009\n42\n' > "$HOME_DIR/state/.mail-seen"
+  printf 'uidvalidity=90009\n999\n' > "$HOME_DIR/state/.mail-seen"
 
   out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" "$log" 90009/999 2>&1) || rc=$?
   expect_code 1 "$rc" "ack of a uid the mailbox does not hold must fail"
@@ -2755,6 +2755,57 @@ PYEOF
   assert_not_contains "$out" "acked" "an unmatched uid must never report success"
   assert_not_contains "$(cat "$log" 2>/dev/null)" "store" "an unmatched uid must never reach STORE"
   pass "fm-mail: ack of an absent uid fails instead of claiming a handled message was marked read"
+}
+
+test_ack_refuses_uid_not_durably_surfaced_by_this_home() {
+  local harness out rc=0 log
+  harness="$TMP_ROOT/ack-unsurfaced-harness.py"
+  log="$TMP_ROOT/ack-unsurfaced-calls.log"
+  rm -f "$log"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+})
+LOG = sys.argv[3]
+class FakeConn:
+    untagged_responses = {'UIDVALIDITY': [b'60006']}
+    def __init__(self, *a, **k):
+        with open(LOG, 'a', encoding='utf-8') as f:
+            f.write('connect\n')
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        with open(LOG, 'a', encoding='utf-8') as f:
+            f.write('%s|%r\n' % (cmd, args))
+        if cmd == 'search':
+            return ('OK', [b'17 98'])
+        if cmd == 'store':
+            return ('OK', [None])
+        return ('NO', None)
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[2])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_ack(sys.argv[4]))
+PYEOF
+  printf 'uidvalidity=60006\n98\n' > "$HOME_DIR/state/.mail-seen"
+
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" "$log" 60006/17 2>&1) || rc=$?
+  expect_code 1 "$rc" "ack of a uid this home never surfaced must fail"
+  assert_contains "$out" "not durably surfaced" "ack names the missing local authorization evidence"
+  assert_not_contains "$out" "acked" "an unsurfaced uid must never report success"
+  [ ! -e "$log" ] || fail "an unsurfaced uid must be refused before any IMAP connection"
+  pass "fm-mail: ack refuses a uid this home never durably surfaced"
 }
 
 test_ack_repeated_completion_idempotent() {
@@ -3169,6 +3220,7 @@ test_invalid_port_fails_cleanly
 test_ack_marks_exact_uid_seen
 test_poll_and_read_never_mark_seen
 test_ack_missing_uid_fails_without_claiming_success
+test_ack_refuses_uid_not_durably_surfaced_by_this_home
 test_ack_repeated_completion_idempotent
 test_ack_refuses_wrong_generation
 test_ack_fails_closed_on_imap_error
