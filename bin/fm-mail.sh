@@ -379,14 +379,16 @@ wake_for() {
   #   3 - the wake row was never appended; nothing was delivered.
   #   4 - the wake was delivered but the optional retry-id cleanup failed.
   local generation=$1 id=$2 summary=$3 retry_id=${4:-} lib="$SCRIPT_DIR/fm-wake-lib.sh" status=0 tag=""
-  local wake_key="mail:$id" ack_hint=""
+  local wake_key="mail:$id"
   [ -n "$retry_id" ] && tag=retry
-  # The ack instruction travels in the wake payload carrying the generation
-  # the uid was surfaced under, so handling the wake is what marks the message
-  # read and a uid from an earlier mailbox can never be acked into a new one.
+  # The ack token lives in the wake key, a field this script alone writes, and
+  # never in the payload: the payload carries sender-controlled sender and
+  # subject text, so a command-shaped subject there must never be mistaken for
+  # the acknowledgement of this wake. Handling the wake is what marks the
+  # message read, and the key's generation keeps a uid from an earlier mailbox
+  # from being acked into a new one.
   if [ -n "$generation" ]; then
     wake_key="mail:$generation/$id"
-    ack_hint=" - when handled: bin/fm-mail.sh ack $generation/$id"
   fi
   if [ ! -f "$lib" ]; then
     echo "fm-mail: $lib missing; cannot wake" >&2
@@ -396,7 +398,7 @@ wake_for() {
   # shellcheck disable=SC1091
   . "$lib"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-  if fm_wake_append_locked check "$wake_key" "check: mail $id - $summary$ack_hint"; then
+  if fm_wake_append_locked check "$wake_key" "check: mail $id - $summary"; then
     if mail_record_evidence "$generation" "$id" "$tag"; then
       :
     elif mail_rollback_wake_locked "$wake_key" "$generation" "$id"; then
