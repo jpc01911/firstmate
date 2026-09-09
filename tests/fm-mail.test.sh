@@ -2626,6 +2626,8 @@ class FakeConn:
         if LOG:
             with open(LOG, 'a', encoding='utf-8') as f:
                 f.write('%s|%r\n' % (cmd, args))
+        if cmd == 'search':
+            return ('OK', [b'42'])
         if cmd == 'store':
             return ('OK', [None])
         return ('NO', None)
@@ -2704,6 +2706,57 @@ PYEOF
   pass "fm-mail: poll and read never change read state"
 }
 
+test_ack_missing_uid_fails_without_claiming_success() {
+  local harness out rc=0 log
+  harness="$TMP_ROOT/ack-missing-harness.py"
+  log="$TMP_ROOT/ack-missing-calls.log"
+  rm -f "$log"
+  cat > "$harness" <<'PYEOF'
+import os, sys
+os.environ.update({
+    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
+    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
+    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
+    'FM_MAIL_CURSOR': sys.argv[1],
+})
+LOG = sys.argv[3] if len(sys.argv) > 3 else ''
+class FakeConn:
+    # The message was moved or expunged: SEARCH matches nothing and a STORE
+    # naming it would still answer OK with an empty result.
+    untagged_responses = {'UIDVALIDITY': [b'90009']}
+    def __init__(self, *a, **k):
+        pass
+    def login(self, *a):
+        pass
+    def select(self, *a):
+        return ('OK', [])
+    def uid(self, cmd, *args):
+        if LOG:
+            with open(LOG, 'a', encoding='utf-8') as f:
+                f.write('%s|%r\n' % (cmd, args))
+        if cmd == 'search':
+            return ('OK', [b''])
+        return ('OK', [None])
+    def logout(self):
+        pass
+import imaplib
+imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
+import importlib.util
+spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[2])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(mod.cmd_ack(sys.argv[4] if len(sys.argv) > 4 else ''))
+PYEOF
+  printf 'uidvalidity=90009\n42\n' > "$HOME_DIR/state/.mail-seen"
+
+  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$ROOT/bin/fm-mail.py" "$log" 999 2>&1) || rc=$?
+  expect_code 1 "$rc" "ack of a uid the mailbox does not hold must fail"
+  assert_contains "$out" "not in the mailbox" "ack names the uid it could not mark read"
+  assert_not_contains "$out" "acked" "an unmatched uid must never report success"
+  assert_not_contains "$(cat "$log" 2>/dev/null)" "store" "an unmatched uid must never reach STORE"
+  pass "fm-mail: ack of an absent uid fails instead of claiming a handled message was marked read"
+}
+
 test_ack_repeated_completion_idempotent() {
   local harness out rc=0 rc2=0
   harness="$TMP_ROOT/ack-repeat-harness.py"
@@ -2726,6 +2779,8 @@ class FakeConn:
     def select(self, *a):
         return ('OK', [])
     def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'42'])
         if cmd == 'store':
             return ('OK', [None])
         return ('NO', None)
@@ -2823,6 +2878,8 @@ class FakeConn:
     def select(self, *a):
         return ('OK', [])
     def uid(self, cmd, *args):
+        if cmd == 'search':
+            return ('OK', [b'42'])
         if cmd == 'store':
             return ('NO', [b'store failed'])
         return ('NO', None)
@@ -2961,6 +3018,7 @@ test_read_surfaces_unfetchable_uid
 test_invalid_port_fails_cleanly
 test_ack_marks_exact_uid_seen
 test_poll_and_read_never_mark_seen
+test_ack_missing_uid_fails_without_claiming_success
 test_ack_repeated_completion_idempotent
 test_ack_refuses_wrong_generation
 test_ack_fails_closed_on_imap_error

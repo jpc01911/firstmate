@@ -482,8 +482,11 @@ def cmd_ack(uid):
     # repeated completion re-issues the same flag and still succeeds. The
     # mailbox generation (UIDVALIDITY) is checked against the cursor before
     # the STORE, so a recreated mailbox can never have a reused numeric uid
-    # marked read. Any failure is loud and changes nothing, so an unhandled
-    # message stays unread instead of being silently lost.
+    # marked read. The uid is confirmed present with a UID SEARCH first,
+    # because a STORE naming no message still succeeds and would report a
+    # still-unread message as handled. Any failure is loud and changes
+    # nothing, so an unhandled message stays unread instead of being
+    # silently lost.
     if not re.fullmatch(r'[0-9]+', uid or ''):
         print('fm-mail ack error: ack needs a numeric IMAP UID')
         return 1
@@ -497,6 +500,15 @@ def cmd_ack(uid):
         if stored_gen and uidv and stored_gen != uidv:
             print('fm-mail ack error: mailbox generation changed '
                   '(uidvalidity mismatch); refusing to mark uid %s read' % uid)
+            return 1
+        typ, data = m.uid('search', None, 'UID', uid)
+        if typ != 'OK':
+            print('fm-mail ack error: server refused to look up uid %s' % uid)
+            return 1
+        found = b' '.join(p for p in (data or []) if p).split()
+        if uid.encode() not in found:
+            print('fm-mail ack error: uid %s is not in the mailbox; '
+                  'nothing was marked read' % uid)
             return 1
         typ, _ = m.uid('store', uid.encode(), '+FLAGS', '(\\Seen)')
         if typ != 'OK':
