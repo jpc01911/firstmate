@@ -93,7 +93,10 @@
 #   The journal, visible token, and labels alone are never endpoint or ownership
 #   authority, and every ambiguous recovery stays on the flat fallback after
 #   duplicate-agent risk is independently absent. Treehouse allocation and task
-#   metadata are unchanged.
+#   metadata are unchanged. A successful Herdr ship or scout spawn then
+#   best-effort converges this home's display-only No-Mistakes monitor tab
+#   (bin/fm-nm-herdr-monitor.sh owns that contract); a monitor failure never
+#   blocks the spawn.
 #   A clean projected create or exact resume makes one bounded attempt to hold
 #   the one session-scoped presentation-order lock (keyed by named session plus
 #   canonical socket, outside any home's state/) through launch handoff. Lock
@@ -4045,3 +4048,12 @@ SPAWN_META_LOCK_HELD=0
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+
+# Best-effort No-Mistakes monitor for Herdr homes: converge this home's
+# display-only monitor tab so the new run appears there automatically.
+# Fail-open by design (bin/fm-nm-herdr-monitor.sh owns the contract) - a
+# monitor failure never blocks the spawn above, and non-Herdr homes are
+# untouched because the monitor adopts the home workspace but never creates it.
+if [ "$BACKEND" = herdr ] && [ "$KIND" != secondmate ]; then
+  FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-nm-herdr-monitor.sh" ensure >/dev/null 2>&1 || true
+fi

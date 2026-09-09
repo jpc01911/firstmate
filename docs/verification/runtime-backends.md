@@ -1094,6 +1094,28 @@ Observed guarantees: `fm-afk-launch.sh start` refused on the Pi primary and `con
 The fixture captures submitted input through Pi's `input` extension hook, so the lab agent directory needs no provider credentials.
 The daemon injection transport into a live composer keeps its coverage in `tests/fm-afk-inject-herdr-e2e.test.sh` for the harnesses that still run the daemon, and the dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
+### No-Mistakes monitor
+
+Verified 2026-09-09 against Herdr 0.8.2 protocol 20 in a guarded non-default lab session with a byte-identical default-session tripwire:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-nm-herdr-monitor-e2e.test.sh
+```
+
+```
+ok - live herdr: ensure converged one monitor tab with a session-bound record
+ok - live herdr: exactly one display-only monitor tab lives in the home workspace
+ok - live herdr: repeated ensure converges with no duplicate pane
+ok - live herdr: empty home renders idle
+ok - live herdr: a future run appears on the next render
+ok - live herdr: status reports the live monitor endpoint
+```
+
+Observed guarantees: the home workspace was adopted rather than created, the monitor tab was created with `--no-focus` inside it, a repeated ensure reused the recorded live pane with no duplicate, an empty home rendered idle, and a new ship task appeared on the next render with no registration.
+The portable view, convergence, fail-open, read-only, and restart-refresh boundaries are pinned by `tests/fm-nm-herdr-monitor.test.sh`, which runs in every portable lane.
+Refresh that live evidence with the command above after any Herdr upgrade before trusting the tab-create and pane-read shapes it depends on.
+
 ## Zellij
 
 The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.

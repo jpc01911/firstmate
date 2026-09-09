@@ -77,6 +77,14 @@ Existing task operations use recorded endpoint ids and do not move a live task w
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
+## No-Mistakes monitor
+
+Each Herdr home has one display-only No-Mistakes monitor tab labeled `nm-monitor` inside its own home workspace, so the captain can watch every active run without entering a worker's pane.
+A successful Herdr ship or scout spawn converges that tab best-effort after launch, and the tab re-renders this home's runs from live state every few seconds, so current and future runs appear with no registration step and concurrent runs are all listed.
+The monitor only reads run state and never answers a gate, and its failure never blocks a spawn, a validation, or supervision.
+`bin/fm-nm-herdr-monitor.sh` owns the placement, convergence, view, read-only, and recovery contracts.
+Run `bin/fm-nm-herdr-monitor.sh --help` for its commands.
+
 ## Presentation spaces
 
 Each new crewmate or scout is placed in a disposable one-task workspace by default, on Herdr 0.8.0 and newer.
@@ -342,6 +350,8 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 ```sh
 tests/fm-backend-herdr.test.sh
 tests/fm-composer-lib.test.sh
+tests/fm-nm-herdr-monitor.test.sh
+tests/fm-nm-herdr-monitor-e2e.test.sh
 tests/fm-herdr-submit-confirm-live-e2e.test.sh
 tests/fm-backend-herdr-smoke.test.sh
 tests/fm-backend-herdr-prune-safety-e2e.test.sh
