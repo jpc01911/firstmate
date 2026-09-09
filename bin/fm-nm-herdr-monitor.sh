@@ -70,6 +70,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # label. Sourced, never re-implemented.
 # shellcheck source=bin/backends/herdr.sh
 . "$FM_ROOT/bin/backends/herdr.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$FM_ROOT/bin/fm-timeout-lib.sh"
 MONITOR_LABEL="nm-monitor"
 MONITOR_RECORD="$STATE/.nm-monitor"
 MONITOR_INTERVAL_DEFAULT=10
@@ -208,11 +210,7 @@ fm_nm_monitor_task_ids() {
 
 fm_nm_monitor_crew_state() {
   local id=$1 out cmd=${FM_NM_MONITOR_CREW_STATE:-$SCRIPT_DIR/fm-crew-state.sh}
-  if command -v timeout >/dev/null 2>&1; then
-    out=$(timeout 20 "$cmd" "$id" 2>/dev/null) || out=""
-  else
-    out=$("$cmd" "$id" 2>/dev/null) || out=""
-  fi
+  out=$(fm_run_timed 20 "$cmd" "$id" 2>/dev/null) || out=""
   [ -n "$out" ] || out="state: unknown · source: none · no current-state source available"
   printf '%s' "$out" | head -1
 }
@@ -273,27 +271,8 @@ fm_nm_monitor_status() {
   fi
 }
 
-fm_nm_monitor_ensure() {
-  local interval session label wsid tabs tab pane kept extras out new_tab new_pane cmd
-  interval=$(fm_nm_monitor_interval "${1:-$MONITOR_INTERVAL_DEFAULT}")
-  if ! command -v herdr >/dev/null 2>&1; then
-    echo "warning: fm-nm-herdr-monitor: herdr CLI not installed; skipping the No-Mistakes monitor (non-Herdr home unchanged)" >&2
-    return 0
-  fi
-  if ! command -v jq >/dev/null 2>&1; then
-    echo "warning: fm-nm-herdr-monitor: jq not installed; skipping the No-Mistakes monitor" >&2
-    return 0
-  fi
-  session=${HERDR_SESSION:-default}
-  label=$(fm_backend_herdr_workspace_label)
-  if ! fm_backend_herdr_cli "$session" status --json >/dev/null 2>&1; then
-    echo "warning: fm-nm-herdr-monitor: herdr session '$session' unreachable; skipping the monitor" >&2
-    return 0
-  fi
-  wsid=$(fm_nm_monitor_home_workspace_id "$session" "$label") || {
-    echo "warning: fm-nm-herdr-monitor: home workspace '$label' not found in session '$session'; leaving non-Herdr layout unchanged" >&2
-    return 0
-  }
+fm_nm_monitor_ensure_locked() {
+  local session=$1 wsid=$2 interval=$3 tabs tab pane kept extras out new_tab new_pane cmd
   if fm_nm_monitor_record_read 2>/dev/null; then
     if [ "$FM_NM_MON_SESSION" = "$session" ] && [ "$FM_NM_MON_WS" = "$wsid" ] \
       && fm_nm_monitor_pane_present "$session" "$FM_NM_MON_PANE" 2>/dev/null; then
@@ -354,6 +333,43 @@ EOF
   fi
   printf 'monitor: created %s:%s in workspace %s\n' "$session" "$new_pane" "$wsid"
   return 0
+}
+
+fm_nm_monitor_ensure() {
+  local interval session label wsid lock rc
+  interval=$(fm_nm_monitor_interval "${1:-$MONITOR_INTERVAL_DEFAULT}")
+  if ! command -v herdr >/dev/null 2>&1; then
+    echo "warning: fm-nm-herdr-monitor: herdr CLI not installed; skipping the No-Mistakes monitor (non-Herdr home unchanged)" >&2
+    return 0
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "warning: fm-nm-herdr-monitor: jq not installed; skipping the No-Mistakes monitor" >&2
+    return 0
+  fi
+  session=${HERDR_SESSION:-default}
+  label=$(fm_backend_herdr_workspace_label)
+  if ! fm_backend_herdr_cli "$session" status --json >/dev/null 2>&1; then
+    echo "warning: fm-nm-herdr-monitor: herdr session '$session' unreachable; skipping the monitor" >&2
+    return 0
+  fi
+  wsid=$(fm_nm_monitor_home_workspace_id "$session" "$label") || {
+    echo "warning: fm-nm-herdr-monitor: home workspace '$label' not found in session '$session'; leaving non-Herdr layout unchanged" >&2
+    return 0
+  }
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$FM_ROOT/bin/fm-wake-lib.sh"
+  lock="$STATE/.nm-monitor.lock"
+  fm_lock_acquire_wait "$lock" || {
+    echo "warning: fm-nm-herdr-monitor: could not lock monitor convergence; skipping" >&2
+    return 0
+  }
+  if fm_nm_monitor_ensure_locked "$session" "$wsid" "$interval"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  fm_lock_release "$lock" || true
+  return "$rc"
 }
 
 fm_nm_monitor_main() {

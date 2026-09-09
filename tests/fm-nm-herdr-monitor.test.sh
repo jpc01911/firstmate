@@ -11,6 +11,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MON="$ROOT/bin/fm-nm-herdr-monitor.sh"
 # shellcheck source=tests/lib.sh
 . "$ROOT/tests/lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot nmmon)
 FAKEBIN="$TMP_ROOT/fakebin"
@@ -43,6 +45,7 @@ case "$args" in
     esac
     ;;
   *"tab create"*)
+    sleep "${FAKE_TAB_CREATE_DELAY:-0}"
     printf '{"result":{"tab":{"tab_id":"t-new"},"root_pane":{"pane_id":"w1:p-new"}}}'
     printf 'tab create %s\n' "$args" >> "$S/calls.log"
     ;;
@@ -179,6 +182,27 @@ case "$(cat "$FAKE_STATE/calls.log")" in
   *) pass "ensure created nothing when the record is live" ;;
 esac
 
+# --- ensure: concurrent convergence creates one monitor tab ------------------
+export FAKE_STATE="$TMP_ROOT/fs-concurrent"
+mkdir -p "$FAKE_STATE"
+: > "$FAKE_STATE/calls.log"
+printf '{"server":{"running":true}}' > "$FAKE_STATE/status.json"
+printf '{"result":{"workspaces":[{"workspace_id":"w-home","label":"firstmate"}]}}' > "$FAKE_STATE/workspaces.json"
+printf '{"result":{"tabs":[]}}' > "$FAKE_STATE/tabs.json"
+printf '{"result":{"panes":[]}}' > "$FAKE_STATE/panes.json"
+write_fake_herdr
+home_concurrent="$TMP_ROOT/home-concurrent"
+make_home "$home_concurrent"
+FAKE_TAB_CREATE_DELAY=1 PATH="$FAKEBIN:$PATH" FM_HOME="$home_concurrent" "$MON" ensure >/dev/null 2>&1 &
+ensure_one=$!
+FAKE_TAB_CREATE_DELAY=1 PATH="$FAKEBIN:$PATH" FM_HOME="$home_concurrent" "$MON" ensure >/dev/null 2>&1 &
+ensure_two=$!
+wait "$ensure_one" || fail "first concurrent ensure failed"
+wait "$ensure_two" || fail "second concurrent ensure failed"
+creates=$(grep -c '^tab create ' "$FAKE_STATE/calls.log" || true)
+[ "$creates" -eq 1 ] || fail "concurrent ensure created $creates monitor tabs"
+pass "concurrent ensure creates one monitor tab"
+
 # --- ensure: converges a live unrecorded tab, closes husk duplicates ---------
 export FAKE_STATE="$TMP_ROOT/fs2"
 mkdir -p "$FAKE_STATE"
@@ -283,7 +307,7 @@ esac
 # --- option parsing: a flag with no value fails fast, never spins -------------
 for bad in "ensure --interval" "render --state-dir"; do
   # shellcheck disable=SC2086
-  out=$(FM_HOME="$home_empty" timeout 10 "$MON" $bad 2>&1); rc=$?
+  out=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_HOME="$home_empty" fm_run_timed 10 "$MON" $bad 2>&1); rc=$?
   [ "$rc" -ne 124 ] || fail "$bad hung instead of rejecting the missing value"
   [ "$rc" -ne 0 ] || fail "$bad accepted a missing value"
   case "$out" in *"requires a value"*) pass "$bad is rejected with a usage error" ;;
