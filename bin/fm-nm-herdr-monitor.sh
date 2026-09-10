@@ -66,6 +66,7 @@ MONITOR_LABEL="nm-monitor"
 MONITOR_RECORD="$STATE/.nm-monitor"
 MONITOR_INTERVAL_DEFAULT=10
 MONITOR_SCAN_WIDTH=4
+MONITOR_LOCK_WAIT_SECONDS=10
 
 fm_nm_monitor_usage() {
   sed -n '/^# Usage:/,/^# `ensure`/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
@@ -279,7 +280,7 @@ fm_nm_monitor_ensure() {
   # shellcheck source=bin/fm-wake-lib.sh
   . "$FM_ROOT/bin/fm-wake-lib.sh"
   lock="$STATE/.nm-monitor.lock"
-  fm_lock_acquire_wait "$lock" || {
+  fm_lock_acquire_wait_bounded "$lock" "$MONITOR_LOCK_WAIT_SECONDS" || {
     echo "warning: fm-nm-herdr-monitor: could not lock monitor convergence; skipping" >&2
     return 0
   }
