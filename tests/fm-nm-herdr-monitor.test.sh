@@ -89,7 +89,7 @@ case "$1" in
   a-active) echo "state: working · source: run-step · validating (running)" ;;
   b-gate) echo "state: parked · source: run-step · parked at review: 2 finding(s)" ;;
   c-failed) echo "state: failed · source: run-step · run failed" ;;
-  d-ci) echo "state: done · source: run-step · checks green: PR ready for review" ;;
+  d-ci) echo "state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)" ;;
   e-done) echo "state: done · source: run-step · run completed" ;;
   f-unknown) echo "state: unknown · source: none · daemon socket down despite attributed run record" ;;
   g-blocked) echo "state: blocked · source: status-log · waiting on approver" ;;
@@ -120,10 +120,10 @@ printf 'kind=scout\nworktree=/tmp\n' > "$home1/state/scout1.meta"
 write_stub_crew_state
 out=$(FM_HOME="$home1" FM_NM_MONITOR_CREW_STATE="$FAKEBIN/stub-crew-state.sh" \
   "$MON" render 2>&1) || fail "render failed: $out"
-for want in "a-active | active" "b-gate | gate-waiting"; do
+for want in "a-active | active" "b-gate | gate-waiting" "c-failed | failed" "d-ci | ci-ready"; do
   case "$out" in *"$want"*) pass "render shows $want" ;; *) fail "render missing $want: $out" ;; esac
 done
-for hidden in c-failed d-ci e-done f-unknown g-blocked h-paused scout1; do
+for hidden in e-done f-unknown g-blocked h-paused scout1; do
   case "$out" in *"$hidden"*) fail "render listed non-active task $hidden: $out" ;; esac
 done
 pass "render hides terminal, non-run, and scout state"

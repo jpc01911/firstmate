@@ -147,6 +147,13 @@ fm_nm_monitor_view_of_state_line() {
   case "$state" in
     working) printf 'active | %s' "${detail:-validating}" ;;
     parked) printf 'gate-waiting | %s' "${detail:-parked at gate}" ;;
+    done)
+      case "$detail" in
+        *"still monitoring"*) printf 'ci-ready | %s' "$detail" ;;
+        *) return 1 ;;
+      esac
+      ;;
+    failed) printf 'failed | %s' "${detail:-run failed}" ;;
     *) return 1 ;;
   esac
 }
