@@ -286,11 +286,18 @@ INTEGRATION_ROOT="$TMP_ROOT/bootstrap-integration"
 mkdir -p "$INTEGRATION_ROOT/home/state" "$INTEGRATION_ROOT/home/data" "$INTEGRATION_ROOT/home/config"
 cp -R "$ROOT/bin" "$INTEGRATION_ROOT/bin"
 TRACE="$INTEGRATION_ROOT/cleanup.trace"
+MONITOR_TRACE="$INTEGRATION_ROOT/monitor.trace"
 cat > "$INTEGRATION_ROOT/bin/fm-herdr-session-cleanup.sh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "${FM_HOME:?}" >> "${FM_HERDR_CLEANUP_TRACE:?}"
 SH
 chmod +x "$INTEGRATION_ROOT/bin/fm-herdr-session-cleanup.sh"
+cat > "$INTEGRATION_ROOT/bin/fm-nm-herdr-monitor.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_HOME:?}" >> "${FM_NM_MONITOR_TRACE:?}"
+exit "${FM_NM_MONITOR_TEST_RC:-0}"
+SH
+chmod +x "$INTEGRATION_ROOT/bin/fm-nm-herdr-monitor.sh"
 printf '%s\n' manual > "$INTEGRATION_ROOT/home/config/backlog-backend"
 FM_HOME="$INTEGRATION_ROOT/home" FM_HERDR_CLEANUP_TRACE="$TRACE" FM_BOOTSTRAP_DETECT_ONLY=1 \
   "$INTEGRATION_ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
@@ -306,13 +313,26 @@ printf '%s\n' 'lock acquired'
 SH
 chmod +x "$INTEGRATION_ROOT/bin/fm-lock.sh"
 FM_HOME="$INTEGRATION_ROOT/home" FM_ROOT_OVERRIDE="$INTEGRATION_ROOT" \
-  FM_HERDR_CLEANUP_TRACE="$TRACE" \
+  FM_HERDR_CLEANUP_TRACE="$TRACE" FM_NM_MONITOR_TRACE="$MONITOR_TRACE" \
   "$INTEGRATION_ROOT/bin/fm-session-start.sh" >/dev/null 2>&1 \
   || fail "lock-owning session start failed"
 [ "$(cat "$TRACE")" = "$INTEGRATION_ROOT/home" ] \
   || fail "lock-owning session start did not run cleanup for its exact home"
+[ "$(cat "$MONITOR_TRACE")" = "$INTEGRATION_ROOT/home" ] \
+  || fail "lock-owning session start did not converge the monitor for its exact home"
+pass "lock-owning session start converges home-local Herdr visual state"
+
+: > "$MONITOR_TRACE"
+FM_HOME="$INTEGRATION_ROOT/home" FM_ROOT_OVERRIDE="$INTEGRATION_ROOT" \
+  FM_HERDR_CLEANUP_TRACE="$TRACE" FM_NM_MONITOR_TRACE="$MONITOR_TRACE" \
+  FM_NM_MONITOR_TEST_RC=1 "$INTEGRATION_ROOT/bin/fm-session-start.sh" >/dev/null 2>&1 \
+  || fail "monitor failure blocked lock-owning session start"
+[ "$(cat "$MONITOR_TRACE")" = "$INTEGRATION_ROOT/home" ] \
+  || fail "session start did not attempt fail-open monitor convergence"
+pass "monitor convergence failure never blocks session start"
 
 : > "$TRACE"
+: > "$MONITOR_TRACE"
 cat > "$INTEGRATION_ROOT/bin/fm-lock.sh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' 'error: another live firstmate session holds the lock' >&2
@@ -320,10 +340,11 @@ exit 1
 SH
 chmod +x "$INTEGRATION_ROOT/bin/fm-lock.sh"
 FM_HOME="$INTEGRATION_ROOT/home" FM_ROOT_OVERRIDE="$INTEGRATION_ROOT" \
-  FM_HERDR_CLEANUP_TRACE="$TRACE" \
+  FM_HERDR_CLEANUP_TRACE="$TRACE" FM_NM_MONITOR_TRACE="$MONITOR_TRACE" \
   "$INTEGRATION_ROOT/bin/fm-session-start.sh" >/dev/null 2>&1 \
   || fail "read-only session start failed"
 [ ! -s "$TRACE" ] || fail "read-only session start ran stale projection cleanup"
-pass "session start runs cleanup only after acquiring its home lock"
+[ ! -s "$MONITOR_TRACE" ] || fail "read-only session start converged the monitor"
+pass "session start runs Herdr visual convergence only after acquiring its home lock"
 
 printf 'all fm-herdr-session-cleanup tests passed\n'

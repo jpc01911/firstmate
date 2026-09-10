@@ -54,8 +54,7 @@ chmod +x "$FAKEBIN/herdr"
 
 lab() { env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"; }
 
-# Stand up this home's own workspace the way a first Herdr spawn would, then
-# the monitor must adopt it rather than create anything.
+# Stand up this home's own workspace the way a first Herdr spawn would.
 WS_OUT=$(lab workspace create --cwd "$HOME_DIR" --label firstmate --no-focus 2>/dev/null) \
   || fail "could not create the home workspace in the lab session"
 WSID=$(printf '%s' "$WS_OUT" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
@@ -66,7 +65,7 @@ export PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH"
 export FM_HOME="$HOME_DIR" HERDR_SESSION="$HERDR_LAB_SESSION"
 
 FM_HOME="$HOME_DIR" HERDR_SESSION="$HERDR_LAB_SESSION" PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" \
-  "$ROOT/bin/fm-nm-herdr-monitor.sh" ensure --interval 3 >/dev/null 2>&1 \
+  "$ROOT/bin/fm-nm-herdr-monitor.sh" ensure >/dev/null 2>&1 \
   || fail "ensure failed in the lab session"
 [ -f "$HOME_DIR/state/.nm-monitor" ] || fail "ensure wrote no record"
 REC_SESSION=$(sed -n '1p' "$HOME_DIR/state/.nm-monitor")
@@ -83,7 +82,7 @@ pass "live herdr: exactly one display-only monitor tab lives in the home workspa
 
 # A second ensure must converge without a duplicate.
 FM_HOME="$HOME_DIR" HERDR_SESSION="$HERDR_LAB_SESSION" PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" \
-  "$ROOT/bin/fm-nm-herdr-monitor.sh" ensure --interval 3 >/dev/null 2>&1 \
+  "$ROOT/bin/fm-nm-herdr-monitor.sh" ensure >/dev/null 2>&1 \
   || fail "second ensure failed"
 TABS2=$(lab tab list --workspace "$WSID" 2>/dev/null) || fail "could not re-list lab tabs"
 MON_COUNT2=$(printf '%s' "$TABS2" | jq --arg want "nm-monitor" \
@@ -93,16 +92,11 @@ MON_COUNT2=$(printf '%s' "$TABS2" | jq --arg want "nm-monitor" \
   || fail "second ensure rewrote a live record"
 pass "live herdr: repeated ensure converges with no duplicate pane"
 
-# Render against the live home: idle now, and a new ship task appears next refresh.
-RENDER=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-nm-herdr-monitor.sh" render --state-dir "$HOME_DIR/state" 2>&1) \
+# Render against the live home: idle now, and a ship without an active run stays hidden.
+RENDER=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-nm-herdr-monitor.sh" render 2>&1) \
   || fail "render failed"
-case "$RENDER" in *"no ship tasks"*) pass "live herdr: empty home renders idle" ;; *) fail "empty render wrong: $RENDER" ;; esac
+case "$RENDER" in *"no active No-Mistakes runs"*) pass "live herdr: empty home renders idle" ;; *) fail "empty render wrong: $RENDER" ;; esac
 printf 'kind=ship\nworktree=/tmp\nbackend=tmux\nharness=claude\n' > "$HOME_DIR/state/e2e-task.meta"
-RENDER2=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-nm-herdr-monitor.sh" render --state-dir "$HOME_DIR/state" 2>&1) \
+RENDER2=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-nm-herdr-monitor.sh" render 2>&1) \
   || fail "re-render failed"
-case "$RENDER2" in *"e2e-task | unknown"*) pass "live herdr: a future run appears on the next render" ;; *) fail "new task hidden: $RENDER2" ;; esac
-
-# Status names the recorded endpoint.
-STATUS=$(FM_HOME="$HOME_DIR" HERDR_SESSION="$HERDR_LAB_SESSION" PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" \
-  "$ROOT/bin/fm-nm-herdr-monitor.sh" status 2>&1) || fail "status failed"
-case "$STATUS" in *"live session=$HERDR_LAB_SESSION"*) pass "live herdr: status reports the live monitor endpoint" ;; *) fail "status wrong: $STATUS" ;; esac
+case "$RENDER2" in *e2e-task*) fail "ship without an active run was listed: $RENDER2" ;; *) pass "live herdr: non-run ship state stays hidden" ;; esac

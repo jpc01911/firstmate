@@ -63,10 +63,6 @@ case "$args" in
     printf 'pane run %s\n' "$args" >> "$S/calls.log"
     printf '{}'
     ;;
-  *"pane close"*)
-    printf 'pane close %s\n' "$args" >> "$S/calls.log"
-    printf '{}'
-    ;;
   *) printf '{}' ;;
 esac
 EOF
@@ -76,6 +72,7 @@ EOF
 write_stub_crew_state() {
   cat > "$FAKEBIN/stub-crew-state.sh" <<'EOF'
 #!/usr/bin/env bash
+[ -z "${FM_NM_MONITOR_DELAY:-}" ] || sleep "$FM_NM_MONITOR_DELAY"
 case "$1" in
   a-active) echo "state: working · source: run-step · validating (running)" ;;
   b-gate) echo "state: parked · source: run-step · parked at review: 2 finding(s)" ;;
@@ -85,6 +82,7 @@ case "$1" in
   f-unknown) echo "state: unknown · source: none · daemon socket down despite attributed run record" ;;
   g-blocked) echo "state: blocked · source: status-log · waiting on approver" ;;
   h-paused) echo "state: paused · source: status-log · upstream release window" ;;
+  z-new) echo "state: working · source: run-step · validating (running)" ;;
   *) echo "state: unknown · source: none · no current-state source available" ;;
 esac
 EOF
@@ -100,7 +98,7 @@ add_ship() {
   printf 'kind=ship\nworktree=/tmp\nbackend=tmux\nharness=claude\n' > "$1/state/$2.meta"
 }
 
-# --- render: all six required views plus blocked/paused, none hidden ---------
+# --- render: only active attributed No-Mistakes runs are listed ---------------
 home1="$TMP_ROOT/home1"
 make_home "$home1"
 for t in a-active b-gate c-failed d-ci e-done f-unknown g-blocked h-paused; do
@@ -109,27 +107,39 @@ done
 printf 'kind=scout\nworktree=/tmp\n' > "$home1/state/scout1.meta"
 write_stub_crew_state
 out=$(FM_HOME="$home1" FM_NM_MONITOR_CREW_STATE="$FAKEBIN/stub-crew-state.sh" \
-  "$MON" render --state-dir "$home1/state" 2>&1) || fail "render failed: $out"
-for want in "a-active | active" "b-gate | gate-waiting" "c-failed | failed" \
-  "d-ci | CI-ready" "e-done | completed" "f-unknown | unknown" \
-  "g-blocked | blocked" "h-paused | paused"; do
+  "$MON" render 2>&1) || fail "render failed: $out"
+for want in "a-active | active" "b-gate | gate-waiting"; do
   case "$out" in *"$want"*) pass "render shows $want" ;; *) fail "render missing $want: $out" ;; esac
 done
-case "$out" in *scout1*) fail "render must list ship runs only, saw scout: $out" ;; *) pass "render lists ship tasks only" ;; esac
+for hidden in c-failed d-ci e-done f-unknown g-blocked h-paused scout1; do
+  case "$out" in *"$hidden"*) fail "render listed non-active task $hidden: $out" ;; esac
+done
+pass "render hides terminal, non-run, and scout state"
 
 # --- render: empty home is idle, not an error --------------------------------
 home_empty="$TMP_ROOT/empty"
 make_home "$home_empty"
 out=$(FM_HOME="$home_empty" FM_NM_MONITOR_CREW_STATE="$FAKEBIN/stub-crew-state.sh" \
-  "$MON" render --state-dir "$home_empty/state" 2>&1) || fail "empty render failed"
-case "$out" in *"idle | no ship tasks"*) pass "empty home renders idle" ;; *) fail "empty home wrong: $out" ;; esac
+  "$MON" render 2>&1) || fail "empty render failed"
+case "$out" in *"idle | no active No-Mistakes runs"*) pass "empty home renders idle" ;; *) fail "empty home wrong: $out" ;; esac
 
 # --- render: future runs appear with no registration --------------------------
 add_ship "$home1" "z-new"
 out=$(FM_HOME="$home1" FM_NM_MONITOR_CREW_STATE="$FAKEBIN/stub-crew-state.sh" \
-  "$MON" render --state-dir "$home1/state" 2>&1) || fail "re-render failed"
-case "$out" in *"z-new | unknown"*) pass "a new task appears on the next render" ;; *) fail "new task hidden: $out" ;; esac
-case "$out" in *"f-unknown | idle"*) fail "an unknown state was mislabeled idle: $out" ;; *) pass "unknown never reads as idle" ;; esac
+  "$MON" render 2>&1) || fail "re-render failed"
+case "$out" in *"z-new | active"*) pass "a new active run appears on the next render" ;; *) fail "new active run hidden: $out" ;; esac
+
+home_parallel="$TMP_ROOT/parallel"
+make_home "$home_parallel"
+for t in 01 02 03 04 05 06 07 08 09 10 11 12; do
+  add_ship "$home_parallel" "p$t"
+done
+started=$(date +%s)
+FM_HOME="$home_parallel" FM_NM_MONITOR_CREW_STATE="$FAKEBIN/stub-crew-state.sh" \
+  FM_NM_MONITOR_DELAY=1 "$MON" render >/dev/null 2>&1 || fail "parallel render failed"
+elapsed=$(($(date +%s) - started))
+[ "$elapsed" -lt 5 ] || fail "active-run scan serialized twelve one-second reads (${elapsed}s)"
+pass "active-run scan reads fleet candidates concurrently"
 
 # --- read-only pipeline proof: real crew-state, recording fake no-mistakes ----
 home_ro="$TMP_ROOT/homero"
@@ -157,7 +167,7 @@ else
 fi
 EOF
 chmod +x "$FAKEBIN/no-mistakes"
-PATH="$FAKEBIN:$PATH" FM_HOME="$home_ro" "$MON" render --state-dir "$home_ro/state" >/dev/null 2>&1 \
+PATH="$FAKEBIN:$PATH" FM_HOME="$home_ro" "$MON" render >/dev/null 2>&1 \
   || fail "read-only render failed"
 [ -f "$TMP_ROOT/nm-calls.log" ] || fail "no-mistakes was never consulted"
 while IFS= read -r call; do
@@ -204,12 +214,6 @@ write_fake_herdr
 home_rebound="$TMP_ROOT/home-rebound"
 make_home "$home_rebound"
 printf 'default\nw-home\nt-previous\nw1:p-old\n' > "$home_rebound/state/.nm-monitor"
-out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$home_rebound" "$MON" status 2>&1) \
-  || fail "status with a rebound recorded pane failed"
-case "$out" in
-  *"binding not live"*) pass "status rejects a pane outside its recorded binding" ;;
-  *) fail "status reported a rebound pane as live: $out" ;;
-esac
 PATH="$FAKEBIN:$PATH" FM_HOME="$home_rebound" "$MON" ensure >/dev/null 2>&1 \
   || fail "ensure with a rebound recorded pane failed"
 case "$(cat "$home_rebound/state/.nm-monitor")" in
@@ -263,36 +267,6 @@ wait "$ensure_two" || fail "second concurrent ensure failed"
 creates=$(grep -c '^tab create ' "$FAKE_STATE/calls.log" || true)
 [ "$creates" -eq 1 ] || fail "concurrent ensure created $creates monitor tabs"
 pass "concurrent ensure creates one monitor tab"
-
-# --- ensure: converges a live unrecorded tab, closes husk duplicates ---------
-export FAKE_STATE="$TMP_ROOT/fs2"
-mkdir -p "$FAKE_STATE"
-: > "$FAKE_STATE/calls.log"
-printf '{"server":{"running":true}}' > "$FAKE_STATE/status.json"
-printf '{"result":{"workspaces":[{"workspace_id":"w-home","label":"firstmate"}]}}' > "$FAKE_STATE/workspaces.json"
-printf '{"result":{"tabs":[{"tab_id":"t-keep","label":"nm-monitor"},{"tab_id":"t-dup","label":"nm-monitor"},{"tab_id":"t-work","label":"fm-task1"}]}}' > "$FAKE_STATE/tabs.json"
-printf '{"result":{"panes":[{"pane_id":"w1:p-keep","tab_id":"t-keep"},{"pane_id":"w1:p-dead-noagent","tab_id":"t-dup"},{"pane_id":"w1:p-work","tab_id":"t-work"}]}}' > "$FAKE_STATE/panes.json"
-write_fake_herdr
-home3="$TMP_ROOT/home3"
-make_home "$home3"
-PATH="$FAKEBIN:$PATH" FM_HOME="$home3" "$MON" ensure >/dev/null 2>&1 \
-  || fail "ensure adoption failed"
-case "$(cat "$home3/state/.nm-monitor")" in
-  *w1:p-keep*) pass "ensure adopted the single live monitor tab" ;;
-  *) fail "ensure adopted wrong tab: $(cat "$home3/state/.nm-monitor")" ;;
-esac
-case "$(cat "$FAKE_STATE/calls.log")" in
-  *"pane close"*"w1:p-dead-noagent"*) pass "ensure closed the husk duplicate" ;;
-  *) fail "ensure left the husk duplicate: $(cat "$FAKE_STATE/calls.log")" ;;
-esac
-case "$(cat "$FAKE_STATE/calls.log")" in
-  *"w1:p-work"*) fail "ensure touched the worker pane" ;;
-  *) pass "ensure never touched the worker pane" ;;
-esac
-case "$(cat "$FAKE_STATE/calls.log")" in
-  *"tab create"*) fail "ensure created a tab when one was live" ;;
-  *) pass "ensure converged without a duplicate" ;;
-esac
 
 # --- ensure: missing home workspace changes nothing (non-Herdr homes) ---------
 export FAKE_STATE="$TMP_ROOT/fs3"
@@ -355,7 +329,7 @@ write_fake_herdr
 home5="$TMP_ROOT/home5"
 make_home "$home5"
 printf 'acme\n' > "$home5/.fm-secondmate-home"
-PATH="$FAKEBIN:$PATH" FM_HOME="$home5" "$MON" render --state-dir "$home5/state" 2>&1 | head -1 | grep -F '[2ndmate-acme]' >/dev/null \
+PATH="$FAKEBIN:$PATH" FM_HOME="$home5" "$MON" render 2>&1 | head -1 | grep -F '[2ndmate-acme]' >/dev/null \
   || fail "secondmate render mislabeled the home"
 pass "secondmate home renders under its own workspace label"
 PATH="$FAKEBIN:$PATH" FM_HOME="$home5" HERDR_SESSION=lab "$MON" ensure >/dev/null 2>&1 \
@@ -364,14 +338,3 @@ case "$(cat "$home5/state/.nm-monitor")" in
   lab*) pass "secondmate record binds its own session" ;;
   *) fail "secondmate record wrong: $(cat "$home5/state/.nm-monitor")" ;;
 esac
-
-# --- option parsing: a flag with no value fails fast, never spins -------------
-for bad in "ensure --interval" "render --state-dir"; do
-  # shellcheck disable=SC2086
-  out=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash FM_HOME="$home_empty" fm_run_timed 10 "$MON" $bad 2>&1); rc=$?
-  [ "$rc" -ne 124 ] || fail "$bad hung instead of rejecting the missing value"
-  [ "$rc" -ne 0 ] || fail "$bad accepted a missing value"
-  case "$out" in *"requires a value"*) pass "$bad is rejected with a usage error" ;;
-    *) fail "$bad gave no usage error: $out" ;;
-  esac
-done

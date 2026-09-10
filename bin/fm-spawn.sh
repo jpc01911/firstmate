@@ -93,7 +93,7 @@
 #   The journal, visible token, and labels alone are never endpoint or ownership
 #   authority, and every ambiguous recovery stays on the flat fallback after
 #   duplicate-agent risk is independently absent. Treehouse allocation and task
-#   metadata are unchanged. A successful Herdr ship or scout spawn then
+#   metadata are unchanged. A successful Herdr ship spawn then
 #   best-effort converges this home's display-only No-Mistakes monitor tab
 #   (bin/fm-nm-herdr-monitor.sh owns that contract); that call is hard-bounded
 #   through bin/fm-timeout-lib.sh, so neither a monitor failure nor a hung
@@ -4058,7 +4058,7 @@ echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW
 # The convergence is hard-bounded through the repo's single bounded-execution
 # owner: a Herdr server that accepts the connection but never answers would
 # otherwise hold this already-delivered spawn open indefinitely.
-if [ "$BACKEND" = herdr ] && [ "$KIND" != secondmate ]; then
+if [ "$BACKEND" = herdr ] && [ "$KIND" = ship ]; then
   # shellcheck source=bin/fm-timeout-lib.sh
   . "$SCRIPT_DIR/fm-timeout-lib.sh"
   fm_run_timed 30 env FM_HOME="$FM_HOME" \

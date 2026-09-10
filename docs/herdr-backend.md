@@ -80,7 +80,8 @@ Closing its last tab can remove the workspace, and the next spawn recreates it.
 ## No-Mistakes monitor
 
 Each Herdr home has one display-only No-Mistakes monitor tab labeled `nm-monitor` inside its own home workspace, so the captain can watch every active run without entering a worker's pane.
-A successful Herdr ship or scout spawn converges that tab best-effort after launch, and the tab re-renders this home's runs from live state every few seconds, so current and future runs appear with no registration step and concurrent runs are all listed.
+A lock-owning session start converges that tab alongside home-local Herdr projection cleanup, and every successful Herdr ship spawn converges it again best-effort after launch.
+The tab re-renders active attributed No-Mistakes runs from live state every few seconds, so current and future runs appear with no registration step and concurrent runs are all listed.
 The monitor only reads run state and never answers a gate, and its failure never blocks a spawn, a validation, or supervision.
 `bin/fm-nm-herdr-monitor.sh` owns the placement, convergence, view, read-only, and recovery contracts.
 Run `bin/fm-nm-herdr-monitor.sh --help` for its commands.

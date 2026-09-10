@@ -1107,13 +1107,10 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 ok - live herdr: ensure converged one monitor tab with a session-bound record
 ok - live herdr: exactly one display-only monitor tab lives in the home workspace
 ok - live herdr: repeated ensure converges with no duplicate pane
-ok - live herdr: empty home renders idle
-ok - live herdr: a future run appears on the next render
-ok - live herdr: status reports the live monitor endpoint
 ```
 
-Observed guarantees: the home workspace was adopted rather than created, the monitor tab was created with `--no-focus` inside it, a repeated ensure reused the recorded live pane with no duplicate, an empty home rendered idle, and a new ship task appeared on the next render with no registration.
-The portable view, convergence, fail-open, read-only, and restart-refresh boundaries are pinned by `tests/fm-nm-herdr-monitor.test.sh`, which runs in every portable lane.
+Observed guarantees: the home workspace was reused rather than created, the monitor tab was created with `--no-focus` inside it, and a repeated ensure reused the recorded live pane with no duplicate.
+The portable active-run view, concurrent reads, exact-record convergence, session-start trigger, fail-open, read-only, and restart-refresh boundaries are pinned by `tests/fm-nm-herdr-monitor.test.sh` and `tests/fm-herdr-session-cleanup.test.sh`, which run in every portable lane.
 Refresh that live evidence with the command above after any Herdr upgrade before trusting the tab-create and pane-read shapes it depends on.
 
 ## Zellij
