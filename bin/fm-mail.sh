@@ -35,14 +35,15 @@
 #                        changes read state: poll and read never mark mail read,
 #                        so a surfaced message stays unread while its work is
 #                        pending. The argument is the generation-bound token
-#                        the wake published; the STORE targets that exact
+#                        the wake published; its UID and generation must match
+#                        this home's durable surfaced-message cursor before an
+#                        IMAP connection is made. The STORE targets that exact
 #                        immutable UID and is refused when the live mailbox
 #                        reports a different generation or none at all, so a
 #                        recreated mailbox can never have a reused numeric uid
 #                        marked read. Repeating ack for an already-read uid
-#                        still succeeds, and any connection or server failure
-#                        is loud and changes nothing, so an unhandled message
-#                        stays unread instead of being silently lost.
+#                        still succeeds, and any refusal, connection failure,
+#                        or server failure is loud and changes nothing.
 #   status               Print configuration and the last poll cursor. No
 #                        network, no wake.
 #
@@ -384,9 +385,9 @@ wake_for() {
   # The ack token lives in the wake key, a field this script alone writes, and
   # never in the payload: the payload carries sender-controlled sender and
   # subject text, so a command-shaped subject there must never be mistaken for
-  # the acknowledgement of this wake. Handling the wake is what marks the
-  # message read, and the key's generation keeps a uid from an earlier mailbox
-  # from being acked into a new one.
+  # the acknowledgement of this wake. Acknowledging the wake after handling
+  # marks the message read, and the key's generation keeps a uid from an
+  # earlier mailbox from being acked into a new one.
   if [ -n "$generation" ]; then
     wake_key="mail:$generation/$id"
   fi

@@ -483,14 +483,15 @@ def cmd_ack(token):
     # message stays unread while its work is pending. STORE +FLAGS is
     # naturally idempotent, so a repeated completion re-issues the same flag
     # and still succeeds. The ack argument is the generation-bound
-    # <uidvalidity>/<uid> token the wake published, and it is checked against
-    # the live mailbox generation, so a uid surfaced under an earlier mailbox
-    # can never mark a reused number read; a mailbox that reports no
-    # generation is refused for the same reason. The uid is then confirmed
-    # present with a UID SEARCH, because a STORE naming no message still
-    # succeeds and would report a still-unread message as handled. Any
-    # failure is loud and changes nothing, so an unhandled message stays
-    # unread instead of being silently lost.
+    # <uidvalidity>/<uid> token the wake published. The matching generation
+    # and uid must exist in this home's durable surfaced-message cursor before
+    # any connection is made, then the generation is checked against the live
+    # mailbox, so arbitrary or stale evidence can never mark a different or
+    # reused number read; a mailbox that reports no generation is refused for
+    # the same reason. The uid is then confirmed present with a UID SEARCH,
+    # because a STORE naming no message still succeeds and would report a
+    # still-unread message as handled. Any failure is loud and changes nothing,
+    # so the message stays unread instead of being silently lost.
     parts = re.fullmatch(r'([0-9]+)/([0-9]+)', token or '')
     if not parts:
         print('fm-mail ack error: ack needs the generation-bound '
