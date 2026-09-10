@@ -18,6 +18,14 @@ MON="$ROOT/bin/fm-nm-herdr-monitor.sh"
 TMP_ROOT=$(fm_test_tmproot nmmon)
 FAKEBIN="$TMP_ROOT/fakebin"
 mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/fake-ps" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *axo*) printf '4242 1\n'; [ -z "${FAKE_PS_CHILD:-}" ] || printf '4343 4242\n' ;;
+  *) printf 'S\n' ;;
+esac
+EOF
+chmod +x "$FAKEBIN/fake-ps"
 
 write_fake_herdr() {
   cat > "$FAKEBIN/herdr" <<'EOF'
@@ -231,6 +239,34 @@ case "$(cat "$FAKE_STATE/calls.log")" in
   *) fail "ensure did not replace the rebound pane" ;;
 esac
 
+# --- ensure: a live record survives a duplicate home-label collision ----------
+export FAKE_STATE="$TMP_ROOT/fs-dup-record"
+mkdir -p "$FAKE_STATE"
+: > "$FAKE_STATE/calls.log"
+printf '{"server":{"running":true}}' > "$FAKE_STATE/status.json"
+printf '{"result":{"workspaces":[{"workspace_id":"w-other","label":"firstmate"},{"workspace_id":"w-home","label":"firstmate"}]}}' > "$FAKE_STATE/workspaces.json"
+printf '{"result":{"tabs":[]}}' > "$FAKE_STATE/tabs.json"
+printf '{"result":{"panes":[]}}' > "$FAKE_STATE/panes.json"
+printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p-old","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"bash","argv0":"-bash"}]}}}' > "$FAKE_STATE/process-info.json"
+write_fake_herdr
+home_dup="$TMP_ROOT/home-dup-record"
+make_home "$home_dup"
+printf 'default\nw-home\nt-old\nw1:p-old\n' > "$home_dup/state/.nm-monitor"
+PATH="$FAKEBIN:$PATH" FM_HOME="$home_dup" FM_HERDR_PS_BIN="$FAKEBIN/fake-ps" \
+  "$MON" ensure >/dev/null 2>&1 || fail "ensure failed with duplicate home labels and a live record"
+case "$(cat "$home_dup/state/.nm-monitor")" in
+  *w1:p-old*) pass "ensure keeps the exact record when the home label is ambiguous" ;;
+  *) fail "ensure discarded a live record over a label collision: $(cat "$home_dup/state/.nm-monitor")" ;;
+esac
+case "$(cat "$FAKE_STATE/calls.log")" in
+  *"pane run"*"watch"*) pass "ensure restores the recorded view despite a label collision" ;;
+  *) fail "ensure skipped convergence over a label collision: $(cat "$FAKE_STATE/calls.log")" ;;
+esac
+case "$(cat "$FAKE_STATE/calls.log")" in
+  *"tab create"*) fail "ensure created a second monitor tab despite a live record" ;;
+  *) pass "ensure creates nothing when the record is still bound" ;;
+esac
+
 # --- ensure: launcher identity selects among duplicate home labels ------------
 export FAKE_STATE="$TMP_ROOT/fs-launcher"
 mkdir -p "$FAKE_STATE"
@@ -297,14 +333,6 @@ case "$(cat "$FAKE_STATE/calls.log")" in
 esac
 
 # --- ensure: a restored lone-shell pane gets its view re-run, a busy one is kept
-cat > "$FAKEBIN/fake-ps" <<'EOF'
-#!/usr/bin/env bash
-case "$*" in
-  *axo*) printf '4242 1\n'; [ -z "${FAKE_PS_CHILD:-}" ] || printf '4343 4242\n' ;;
-  *) printf 'S\n' ;;
-esac
-EOF
-chmod +x "$FAKEBIN/fake-ps"
 export FAKE_STATE="$TMP_ROOT/fs5"
 mkdir -p "$FAKE_STATE"
 : > "$FAKE_STATE/calls.log"

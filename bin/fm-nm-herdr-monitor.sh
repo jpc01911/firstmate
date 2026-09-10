@@ -12,7 +12,7 @@
 # that never use Herdr and task placement are unchanged.
 #
 # Convergence: `ensure` is idempotent.
-# It reuses the recorded endpoint when its pane, tab, and workspace binding is still exact, otherwise creates one fresh tab under the serialized convergence lock.
+# It reuses the recorded endpoint when its session matches and its pane, tab, and workspace binding is still exact, and only resolves this home's workspace when a fresh tab has to be created under the serialized convergence lock.
 # Creation uses --no-focus and never moves focus.
 # The record at state/.nm-monitor holds exact session, workspace, tab, and pane ids; labels and tokens are never authority.
 #
@@ -223,15 +223,20 @@ fm_nm_monitor_watch() {
 }
 
 fm_nm_monitor_ensure_locked() {
-  local session=$1 wsid=$2 out new_tab new_pane cmd
+  local session=$1 label wsid out new_tab new_pane cmd
   if fm_nm_monitor_record_read 2>/dev/null; then
-    if [ "$FM_NM_MON_SESSION" = "$session" ] && [ "$FM_NM_MON_WS" = "$wsid" ] \
+    if [ "$FM_NM_MON_SESSION" = "$session" ] \
       && fm_nm_monitor_pane_bound "$session" "$FM_NM_MON_WS" "$FM_NM_MON_TAB" "$FM_NM_MON_PANE" 2>/dev/null; then
       fm_nm_monitor_refresh_view_if_stale "$session" "$FM_NM_MON_PANE"
       printf 'monitor: reusing live pane %s:%s\n' "$session" "$FM_NM_MON_PANE"
       return 0
     fi
   fi
+  label=$(fm_backend_herdr_workspace_label)
+  wsid=$(fm_nm_monitor_home_workspace_id "$session") || {
+    echo "warning: fm-nm-herdr-monitor: home workspace '$label' could not be resolved in session '$session'; leaving non-Herdr layout unchanged" >&2
+    return 0
+  }
   out=$(fm_backend_herdr_cli "$session" tab create --workspace "$wsid" --cwd "$FM_HOME" --label "$MONITOR_LABEL" --no-focus 2>/dev/null) || {
     echo "warning: fm-nm-herdr-monitor: could not create the monitor tab; skipping" >&2
     return 0
@@ -257,7 +262,7 @@ fm_nm_monitor_ensure_locked() {
 }
 
 fm_nm_monitor_ensure() {
-  local session label wsid lock rc
+  local session lock rc
   if ! command -v herdr >/dev/null 2>&1; then
     echo "warning: fm-nm-herdr-monitor: herdr CLI not installed; skipping the No-Mistakes monitor (non-Herdr home unchanged)" >&2
     return 0
@@ -267,15 +272,10 @@ fm_nm_monitor_ensure() {
     return 0
   fi
   session=${HERDR_SESSION:-default}
-  label=$(fm_backend_herdr_workspace_label)
   if ! fm_backend_herdr_cli "$session" status --json >/dev/null 2>&1; then
     echo "warning: fm-nm-herdr-monitor: herdr session '$session' unreachable; skipping the monitor" >&2
     return 0
   fi
-  wsid=$(fm_nm_monitor_home_workspace_id "$session") || {
-    echo "warning: fm-nm-herdr-monitor: home workspace '$label' could not be resolved in session '$session'; leaving non-Herdr layout unchanged" >&2
-    return 0
-  }
   # shellcheck source=bin/fm-wake-lib.sh
   . "$FM_ROOT/bin/fm-wake-lib.sh"
   lock="$STATE/.nm-monitor.lock"
@@ -283,7 +283,7 @@ fm_nm_monitor_ensure() {
     echo "warning: fm-nm-herdr-monitor: could not lock monitor convergence; skipping" >&2
     return 0
   }
-  if fm_nm_monitor_ensure_locked "$session" "$wsid"; then
+  if fm_nm_monitor_ensure_locked "$session"; then
     rc=0
   else
     rc=$?
