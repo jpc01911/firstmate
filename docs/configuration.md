@@ -566,6 +566,12 @@ FM_SMTP_HOST=   # SMTP server hostname
 The per-poll wake cap bounds the wakes of one `poll` run; header fetches scan a larger bounded window of new unseen uids plus already-surfaced retry-set uids, so a flood or large backlog still makes bounded progress every poll, keeping the durable wake queue bounded without ever dropping mail.
 A message whose header cannot be fetched is surfaced with a degraded summary instead of being skipped, so it is never missed and cannot block later mail.
 A later poll retries that fetch and, on success, surfaces the real sender and subject; a persistently unfetchable message stays degraded without repeating that wake.
+Each mail wake carries its acknowledgement token in the wake row's own `mail:<uidvalidity>/<uid>` key field, structurally separate from the wake text quoting the sender-controlled sender and subject, and AGENTS.md's `check:` handling rule requires running `bin/fm-mail.sh ack <uidvalidity>/<uid>` with that key's token once the requested task is handled; it marks that exact UID read (`UID STORE \Seen`).
+`poll` and `read` never mark mail read, so a message stays unread while its work is pending and handled mail stops appearing as unseen on later checks.
+`ack` also requires the UID and matching generation in this home's durable surfaced-message cursor; arbitrary, absent, or mismatched local evidence is refused before connecting to IMAP.
+Repeated `ack` for one UID still succeeds, while a token whose generation does not match the live mailbox, or a mailbox reporting no generation at all, refuses the STORE so a reused numeric UID in a recreated mailbox is never marked read.
+A failed `ack` is loud and changes nothing, so the message stays unread instead of a different or unverified message being silently lost.
+The `ack` path uses the same `.env`/IMAP contract as `poll` with no harness interaction, so durable mail handling never depends on the active session.
 
 A home that wants mail polled unattended arms the standing check in the live home: `bin/fm-mail-check.sh arm`.
 Arming writes `state/mail.check.sh` and registers it with the watcher's slow-check cadence (`FM_CHECK_INTERVAL`), so the plane's `poll` runs on its own: new mail still surfaces as `check: mail <uid>` wakes from the poll, and the standing check itself also prints a line (and the watcher turns that line into a wake) unless the poll is a proven no-op.

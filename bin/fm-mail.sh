@@ -29,6 +29,21 @@
 #                        `at`/cron, or via the standing check armed by
 #                        bin/fm-mail-check.sh (docs/configuration.md
 #                        "Mail plane").
+#   ack <uidvalidity>/<uid>
+#                        Mark one handled message read (UID STORE \Seen) after
+#                        its requested work is done. This is the only path that
+#                        changes read state: poll and read never mark mail read,
+#                        so a surfaced message stays unread while its work is
+#                        pending. The argument is the generation-bound token
+#                        the wake published; its UID and generation must match
+#                        this home's durable surfaced-message cursor before an
+#                        IMAP connection is made. The STORE targets that exact
+#                        immutable UID and is refused when the live mailbox
+#                        reports a different generation or none at all, so a
+#                        recreated mailbox can never have a reused numeric uid
+#                        marked read. Repeating ack for an already-read uid
+#                        still succeeds, and any refusal, connection failure,
+#                        or server failure is loud and changes nothing.
 #   status               Print configuration and the last poll cursor. No
 #                        network, no wake.
 #
@@ -59,7 +74,8 @@
 #
 # IMAP/SMTP work is delegated to bin/fm-mail.py (imaplib/smtplib, implicit TLS
 # on 993/465). STARTTLS and port 587 are not supported. BODY.PEEK is used on
-# read/poll so mail is never marked seen before firstmate actually answers it.
+# read/poll so mail is never marked seen before firstmate actually answers it;
+# only ack adds \Seen, for one handled UID after its work is done.
 
 set -euo pipefail
 
@@ -183,6 +199,7 @@ usage() {
 fm-mail.sh read
 fm-mail.sh send <to> <subject> <body | ->
 fm-mail.sh poll
+fm-mail.sh ack <uidvalidity>/<uid>
 fm-mail.sh status
 EOF
 }
@@ -365,6 +382,12 @@ wake_for() {
   local generation=$1 id=$2 summary=$3 retry_id=${4:-} lib="$SCRIPT_DIR/fm-wake-lib.sh" status=0 tag=""
   local wake_key="mail:$id"
   [ -n "$retry_id" ] && tag=retry
+  # The ack token lives in the wake key, a field this script alone writes, and
+  # never in the payload: the payload carries sender-controlled sender and
+  # subject text, so a command-shaped subject there must never be mistaken for
+  # the acknowledgement of this wake. Acknowledging the wake after handling
+  # marks the message read, and the key's generation keeps a uid from an
+  # earlier mailbox from being acked into a new one.
   if [ -n "$generation" ]; then
     wake_key="mail:$generation/$id"
   fi
@@ -640,6 +663,24 @@ case "${1:-}" in
     ;;
   poll)
     mail_poll
+    ;;
+  ack)
+    token="${2:-}"
+    ack_gen="${token%%/*}"
+    ack_uid="${token#*/}"
+    case "$token" in
+      */*) ;;
+      *) ack_gen=""; ack_uid="" ;;
+    esac
+    case "$ack_gen" in ''|*[!0-9]*) ack_uid="" ;; esac
+    case "$ack_uid" in
+      ''|*[!0-9]*)
+        echo "fm-mail: ack needs the generation-bound <uidvalidity>/<uid> token published with the mail wake" >&2
+        usage >&2
+        exit 1
+        ;;
+    esac
+    run_py ack "$token"
     ;;
   -h|--help)
     usage

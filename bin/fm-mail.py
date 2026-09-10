@@ -9,10 +9,14 @@
 #                          plus a retry-set of previously unfetchable uids;
 #                          persists the retry-scan position and cap-1 turn flag.
 #   seen <cursor>          Print a cursor file (used by `status`).
+#   ack <uidvalidity>/<uid>
+#                          Mark one handled message read (UID STORE \Seen),
+#                          bound to the generation it was surfaced under.
 #
 # All configuration arrives through the environment, never through arguments,
 # so credentials never appear in argv or logs. read/poll use BODY.PEEK so mail
-# is never marked seen before firstmate answers it.
+# is never marked seen before firstmate answers it; only ack adds \Seen, for
+# one handled UID after its work is done.
 import imaplib
 import os
 import re
@@ -472,10 +476,81 @@ def cmd_poll_list():
                 pass
 
 
+def cmd_ack(token):
+    # Mark one handled message read by adding \Seen to the exact immutable
+    # IMAP UID that was surfaced. This is the only path that changes read
+    # state: poll and read use BODY.PEEK and never STORE, so a newly surfaced
+    # message stays unread while its work is pending. STORE +FLAGS is
+    # naturally idempotent, so a repeated completion re-issues the same flag
+    # and still succeeds. The ack argument is the generation-bound
+    # <uidvalidity>/<uid> token the wake published. The matching generation
+    # and uid must exist in this home's durable surfaced-message cursor before
+    # any connection is made, then the generation is checked against the live
+    # mailbox, so arbitrary or stale evidence can never mark a different or
+    # reused number read; a mailbox that reports no generation is refused for
+    # the same reason. The uid is then confirmed present with a UID SEARCH,
+    # because a STORE naming no message still succeeds and would report a
+    # still-unread message as handled. Any failure is loud and changes nothing,
+    # so the message stays unread instead of being silently lost.
+    parts = re.fullmatch(r'([0-9]+)/([0-9]+)', token or '')
+    if not parts:
+        print('fm-mail ack error: ack needs the generation-bound '
+              '<uidvalidity>/<uid> token published with the mail wake')
+        return 1
+    gen, uid = parts.group(1), parts.group(2)
+    stored_gen, surfaced = load_cursor(os.environ.get('FM_MAIL_CURSOR', ''))
+    if stored_gen != gen or uid not in surfaced:
+        print('fm-mail ack error: uid %s was not durably surfaced by this '
+              'home under mailbox generation %s; nothing was marked read'
+              % (uid, gen))
+        return 1
+    m = None
+    try:
+        m = connect_mailbox()
+        m.select('INBOX')
+        ur = m.untagged_responses.get('UIDVALIDITY')
+        uidv = clean(ur[-1].decode()) if ur else ''
+        if not uidv:
+            print('fm-mail ack error: mailbox reported no generation '
+                  '(uidvalidity); refusing to mark uid %s read' % uid)
+            return 1
+        if uidv != gen:
+            print('fm-mail ack error: mailbox generation changed (surfaced '
+                  'under %s, now %s); refusing to mark uid %s read'
+                  % (gen, uidv, uid))
+            return 1
+        typ, data = m.uid('search', None, 'UID', uid)
+        if typ != 'OK':
+            print('fm-mail ack error: server refused to look up uid %s' % uid)
+            return 1
+        found = b' '.join(p for p in (data or []) if p).split()
+        if uid.encode() not in found:
+            print('fm-mail ack error: uid %s is not in the mailbox; '
+                  'nothing was marked read' % uid)
+            return 1
+        typ, _ = m.uid('store', uid.encode(), '+FLAGS', '(\\Seen)')
+        if typ != 'OK':
+            print('fm-mail ack error: server refused to mark uid %s read' % uid)
+            return 1
+    except Exception as e:
+        print('fm-mail ack error:', e)
+        return 1
+    finally:
+        if m is not None:
+            try:
+                m.logout()
+            except Exception:
+                pass
+    print('acked %s' % uid)
+    return 0
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ''
     if cmd == 'read':
         return cmd_read()
+    if cmd == 'ack':
+        return cmd_ack(sys.argv[2] if len(sys.argv) > 2 else '')
     if cmd == 'send':
         if len(sys.argv) < 5:
             return 1
