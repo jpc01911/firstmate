@@ -65,6 +65,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 MONITOR_LABEL="nm-monitor"
 MONITOR_RECORD="$STATE/.nm-monitor"
 MONITOR_INTERVAL_DEFAULT=10
+MONITOR_SCAN_WIDTH=4
 
 fm_nm_monitor_usage() {
   sed -n '/^# Usage:/,/^# `ensure`/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
@@ -108,33 +109,21 @@ fm_nm_monitor_pane_bound() {
   ' >/dev/null 2>&1
 }
 
-fm_nm_monitor_pane_is_husk() {
-  local session=$1 pane=$2 out code
-  out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
-  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
-  [ -n "$code" ] && return 0
-  out=$(fm_backend_herdr_cli "$session" agent get "$pane" 2>&1)
-  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
-  [ "$code" = "agent_not_found" ]
-}
-
 # Restart recovery for a recorded pane: a Herdr or FirstMate restart leaves the
-# recorded tab structurally present but its watch loop gone. When the pane's
-# recent output carries no monitor header and no agent is registered in it,
-# re-run the watch there; a pane hosting a live agent is left untouched.
+# recorded tab structurally present but its watch loop gone, which a restored
+# layout presents as a lone idle shell. fm_backend_herdr_pane_idle_shell_pid is
+# the single owner of that proof (lone recognized shell, no child process, no
+# foreground command), so a pane still running the watch loop - or hosting any
+# other live process - fails the proof and is left untouched.
 fm_nm_monitor_refresh_view_if_stale() {
-  local session=$1 pane=$2 cap out cmd
-  cap=$(fm_backend_herdr_cli "$session" pane read "$pane" --source recent --lines 30 2>/dev/null) || return 0
-  case "$cap" in
-    *"No-Mistakes monitor"*) return 0 ;;
-  esac
-  fm_nm_monitor_pane_is_husk "$session" "$pane" 2>/dev/null || return 0
+  local session=$1 pane=$2 cmd
+  fm_backend_herdr_pane_idle_shell_pid "$session" "$pane" >/dev/null 2>&1 || return 0
   cmd=$(printf 'exec env FM_HOME=%q %q watch' "$FM_HOME" "$SCRIPT_DIR/fm-nm-herdr-monitor.sh")
   fm_backend_herdr_cli "$session" pane run "$pane" "$cmd" >/dev/null 2>&1 || true
 }
 
 fm_nm_monitor_home_workspace_id() {
-  local session=$1 label=$2 launcher_status out count wsid
+  local session=$1 launcher_status matches count
   if fm_backend_herdr_launcher_identity "$session" 2>/dev/null; then
     printf '%s' "$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID"
     return 0
@@ -142,14 +131,10 @@ fm_nm_monitor_home_workspace_id() {
     launcher_status=$?
   fi
   [ "$launcher_status" -eq 2 ] || return 1
-  out=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
-  count=$(printf '%s' "$out" | jq --arg want "$label" \
-    '[.result.workspaces[]? | select(.label == $want)] | length' 2>/dev/null) || return 1
+  matches=$(fm_backend_herdr_workspace_find_all "$session") || return 1
+  count=$(printf '%s\n' "$matches" | grep -c '[^[:space:]]')
   [ "$count" = 1 ] || return 1
-  wsid=$(printf '%s' "$out" | jq -r --arg want "$label" \
-    '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null) || return 1
-  [ -n "$wsid" ] || return 1
-  printf '%s' "$wsid"
+  printf '%s' "$matches"
 }
 
 fm_nm_monitor_view_of_state_line() {
@@ -194,7 +179,7 @@ fm_nm_monitor_render_task() {
 }
 
 fm_nm_monitor_render() {
-  local label now id render_dir result index=0 active=0
+  local label now id render_dir result index=0 active=0 inflight=0
   label=$(fm_backend_herdr_workspace_label)
   now=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)
   printf 'No-Mistakes monitor · home workspace [%s] · %s\n' "$label" "$now"
@@ -208,6 +193,11 @@ fm_nm_monitor_render() {
     [ -n "$id" ] || continue
     index=$((index + 1))
     fm_nm_monitor_render_task "$id" > "$render_dir/$(printf '%08d' "$index")" &
+    inflight=$((inflight + 1))
+    if [ "$inflight" -ge "$MONITOR_SCAN_WIDTH" ]; then
+      wait
+      inflight=0
+    fi
   done <<EOF
 $(fm_nm_monitor_task_ids)
 EOF
@@ -252,7 +242,11 @@ fm_nm_monitor_ensure_locked() {
     echo "warning: fm-nm-herdr-monitor: monitor create returned incomplete ids; skipping" >&2
     return 0
   fi
-  fm_nm_monitor_record_write "$session" "$wsid" "$new_tab" "$new_pane" || true
+  if ! fm_nm_monitor_record_write "$session" "$wsid" "$new_tab" "$new_pane"; then
+    echo "warning: fm-nm-herdr-monitor: could not publish the monitor record at $MONITOR_RECORD; closing the new tab so unrecorded monitors cannot accumulate" >&2
+    fm_backend_herdr_cli "$session" tab close "$new_tab" >/dev/null 2>&1 || true
+    return 0
+  fi
   cmd=$(printf 'exec env FM_HOME=%q %q watch' "$FM_HOME" "$SCRIPT_DIR/fm-nm-herdr-monitor.sh")
   if ! fm_backend_herdr_cli "$session" pane run "$new_pane" "$cmd" >/dev/null 2>&1; then
     echo "warning: fm-nm-herdr-monitor: monitor tab created but the view did not start; visit it and run: bin/fm-nm-herdr-monitor.sh watch" >&2
@@ -278,7 +272,7 @@ fm_nm_monitor_ensure() {
     echo "warning: fm-nm-herdr-monitor: herdr session '$session' unreachable; skipping the monitor" >&2
     return 0
   fi
-  wsid=$(fm_nm_monitor_home_workspace_id "$session" "$label") || {
+  wsid=$(fm_nm_monitor_home_workspace_id "$session") || {
     echo "warning: fm-nm-herdr-monitor: home workspace '$label' could not be resolved in session '$session'; leaving non-Herdr layout unchanged" >&2
     return 0
   }

@@ -35,7 +35,7 @@ case "$args" in
     jq -c --arg tab "$tab" '.[$tab] // {"error":{"code":"tab_not_found"}}' "$S/tab-get.json"
     ;;
   *"pane list"*) cat "$S/panes.json" ;;
-  *"pane read"*) cat "$S/read.txt" 2>/dev/null || printf 'stale shell, no header here' ;;
+  *"pane process-info"*) cat "$S/process-info.json" 2>/dev/null || printf '{}' ;;
   *"pane get"*)
     pane="$3"
     case "$pane" in
@@ -58,6 +58,10 @@ case "$args" in
     sleep "${FAKE_TAB_CREATE_DELAY:-0}"
     printf '{"result":{"tab":{"tab_id":"t-new"},"root_pane":{"pane_id":"w1:p-new"}}}'
     printf 'tab create %s\n' "$args" >> "$S/calls.log"
+    ;;
+  *"tab close"*)
+    printf 'tab close %s\n' "$args" >> "$S/calls.log"
+    printf '{}'
     ;;
   *"pane run"*)
     printf 'pane run %s\n' "$args" >> "$S/calls.log"
@@ -140,6 +144,8 @@ FM_HOME="$home_parallel" FM_NM_MONITOR_CREW_STATE="$FAKEBIN/stub-crew-state.sh" 
 elapsed=$(($(date +%s) - started))
 [ "$elapsed" -lt 5 ] || fail "active-run scan serialized twelve one-second reads (${elapsed}s)"
 pass "active-run scan reads fleet candidates concurrently"
+[ "$elapsed" -ge 2 ] || fail "active-run scan probed all twelve tasks at once (${elapsed}s); the fan-out is unbounded"
+pass "active-run scan bounds its concurrent fan-out"
 
 # --- read-only pipeline proof: real crew-state, recording fake no-mistakes ----
 home_ro="$TMP_ROOT/homero"
@@ -290,7 +296,15 @@ case "$(cat "$FAKE_STATE/calls.log")" in
   *) pass "non-Herdr layout unchanged" ;;
 esac
 
-# --- ensure: a restarted husk pane gets its view re-run, a live view is kept --
+# --- ensure: a restored lone-shell pane gets its view re-run, a busy one is kept
+cat > "$FAKEBIN/fake-ps" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *axo*) printf '4242 1\n'; [ -z "${FAKE_PS_CHILD:-}" ] || printf '4343 4242\n' ;;
+  *) printf 'S\n' ;;
+esac
+EOF
+chmod +x "$FAKEBIN/fake-ps"
 export FAKE_STATE="$TMP_ROOT/fs5"
 mkdir -p "$FAKE_STATE"
 : > "$FAKE_STATE/calls.log"
@@ -298,24 +312,56 @@ printf '{"server":{"running":true}}' > "$FAKE_STATE/status.json"
 printf '{"result":{"workspaces":[{"workspace_id":"w-home","label":"firstmate"}]}}' > "$FAKE_STATE/workspaces.json"
 printf '{"result":{"tabs":[]}}' > "$FAKE_STATE/tabs.json"
 printf '{"result":{"panes":[]}}' > "$FAKE_STATE/panes.json"
-printf 'stale shell after restart, no header here' > "$FAKE_STATE/read.txt"
+printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p-stale-noagent","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"bash","argv0":"-bash"}]}}}' > "$FAKE_STATE/process-info.json"
+write_fake_herdr
 home6="$TMP_ROOT/home6"
 make_home "$home6"
 printf 'default\nw-home\nt-stale\nw1:p-stale-noagent\n' > "$home6/state/.nm-monitor"
-PATH="$FAKEBIN:$PATH" FM_HOME="$home6" "$MON" ensure >/dev/null 2>&1 \
-  || fail "ensure on a stale pane failed"
+PATH="$FAKEBIN:$PATH" FM_HOME="$home6" FM_HERDR_PS_BIN="$FAKEBIN/fake-ps" \
+  "$MON" ensure >/dev/null 2>&1 || fail "ensure on a restored shell pane failed"
 case "$(cat "$FAKE_STATE/calls.log")" in
-  *"pane run"*"watch"*) pass "ensure re-runs the view in a restarted husk pane" ;;
-  *) fail "ensure left a restarted pane blank: $(cat "$FAKE_STATE/calls.log")" ;;
+  *"pane run"*"watch"*) pass "ensure re-runs the view in a restored lone-shell pane" ;;
+  *) fail "ensure left a restored pane blank: $(cat "$FAKE_STATE/calls.log")" ;;
 esac
-printf 'No-Mistakes monitor · home workspace [firstmate]\nship log line\n' > "$FAKE_STATE/read.txt"
 : > "$FAKE_STATE/calls.log"
-PATH="$FAKEBIN:$PATH" FM_HOME="$home6" "$MON" ensure >/dev/null 2>&1 \
-  || fail "ensure on a live view failed"
+PATH="$FAKEBIN:$PATH" FM_HOME="$home6" FM_HERDR_PS_BIN="$FAKEBIN/fake-ps" \
+  FAKE_PS_CHILD=1 FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=2 \
+  "$MON" ensure >/dev/null 2>&1 || fail "ensure on a busy view failed"
 case "$(cat "$FAKE_STATE/calls.log")" in
-  *"pane run"*) fail "ensure re-ran a live view" ;;
+  *"pane run"*) fail "ensure re-ran a pane that still had a running child process" ;;
   *) pass "ensure leaves a live monitor view running" ;;
 esac
+
+# --- ensure: an unpublishable record never leaves an orphan monitor tab -------
+if [ "$(id -u)" != 0 ]; then
+  export FAKE_STATE="$TMP_ROOT/fs-norecord"
+  mkdir -p "$FAKE_STATE"
+  : > "$FAKE_STATE/calls.log"
+  printf '{"server":{"running":true}}' > "$FAKE_STATE/status.json"
+  printf '{"result":{"workspaces":[{"workspace_id":"w-home","label":"firstmate"}]}}' > "$FAKE_STATE/workspaces.json"
+  printf '{"result":{"tabs":[]}}' > "$FAKE_STATE/tabs.json"
+  printf '{"result":{"panes":[]}}' > "$FAKE_STATE/panes.json"
+  write_fake_herdr
+  home_norecord="$TMP_ROOT/home-norecord"
+  make_home "$home_norecord"
+  mkdir -p "$home_norecord/state/.nm-monitor/blocker"
+  chmod 0500 "$home_norecord/state/.nm-monitor"
+  err=$(PATH="$FAKEBIN:$PATH" FM_HOME="$home_norecord" "$MON" ensure 2>&1 >/dev/null) \
+    || fail "ensure must stay fail-open when the record cannot be published"
+  chmod 0700 "$home_norecord/state/.nm-monitor"
+  case "$err" in
+    *"could not publish the monitor record"*) pass "ensure reports an unpublishable monitor record" ;;
+    *) fail "ensure published nothing and said nothing: $err" ;;
+  esac
+  case "$(cat "$FAKE_STATE/calls.log")" in
+    *"tab close t-new"*) pass "ensure rolls back the tab it could not record" ;;
+    *) fail "ensure left an unrecorded monitor tab behind: $(cat "$FAKE_STATE/calls.log")" ;;
+  esac
+  case "$(cat "$FAKE_STATE/calls.log")" in
+    *"pane run"*) fail "ensure started a view in a tab it could not record" ;;
+    *) pass "ensure never starts an unrecorded view" ;;
+  esac
+fi
 
 # --- ensure: secondmate homes scope to their own workspace label --------------
 export FAKE_STATE="$TMP_ROOT/fs4"
