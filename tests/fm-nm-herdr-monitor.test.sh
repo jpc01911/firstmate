@@ -6,6 +6,7 @@
 # is a stub through FM_NM_MONITOR_CREW_STATE, and the read-only pipeline proof
 # drives the REAL fm-crew-state.sh against a recording fake `no-mistakes`.
 set -u
+unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH HERDR_SESSION
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MON="$ROOT/bin/fm-nm-herdr-monitor.sh"
@@ -26,14 +27,23 @@ S="$FAKE_STATE"
 args="$*"
 case "$args" in
   *"status --json"*) cat "$S/status.json" ;;
+  *"session list --json"*) cat "$S/sessions.json" ;;
   *"workspace list"*) cat "$S/workspaces.json" ;;
   *"tab list"*) cat "$S/tabs.json" ;;
+  *"tab get"*)
+    tab="$3"
+    jq -c --arg tab "$tab" '.[$tab] // {"error":{"code":"tab_not_found"}}' "$S/tab-get.json"
+    ;;
   *"pane list"*) cat "$S/panes.json" ;;
   *"pane read"*) cat "$S/read.txt" 2>/dev/null || printf 'stale shell, no header here' ;;
   *"pane get"*)
     pane="$3"
     case "$pane" in
       *dead*) printf '{"error":{"code":"pane_not_found"}}' ;;
+      w1:p-old) printf '{"result":{"pane":{"pane_id":"w1:p-old","tab_id":"t-old","workspace_id":"w-home"}}}' ;;
+      w1:p-stale-noagent) printf '{"result":{"pane":{"pane_id":"w1:p-stale-noagent","tab_id":"t-stale","workspace_id":"w-home"}}}' ;;
+      w1:p-new) printf '{"result":{"pane":{"pane_id":"w1:p-new","tab_id":"t-new","workspace_id":"w-home"}}}' ;;
+      w9:p-launcher) jq -c --arg pane "$pane" '.[$pane]' "$S/pane-get.json" ;;
       *) printf '{"result":{"pane":{"pane_id":"%s"}}}' "$pane" ;;
     esac
     ;;
@@ -180,6 +190,57 @@ esac
 case "$(cat "$FAKE_STATE/calls.log")" in
   *"tab create"*) fail "ensure created a tab despite a live record" ;;
   *) pass "ensure created nothing when the record is live" ;;
+esac
+
+# --- ensure: a reused pane must still belong to its recorded tab/workspace ----
+export FAKE_STATE="$TMP_ROOT/fs-rebound"
+mkdir -p "$FAKE_STATE"
+: > "$FAKE_STATE/calls.log"
+printf '{"server":{"running":true}}' > "$FAKE_STATE/status.json"
+printf '{"result":{"workspaces":[{"workspace_id":"w-home","label":"firstmate"}]}}' > "$FAKE_STATE/workspaces.json"
+printf '{"result":{"tabs":[]}}' > "$FAKE_STATE/tabs.json"
+printf '{"result":{"panes":[]}}' > "$FAKE_STATE/panes.json"
+write_fake_herdr
+home_rebound="$TMP_ROOT/home-rebound"
+make_home "$home_rebound"
+printf 'default\nw-home\nt-previous\nw1:p-old\n' > "$home_rebound/state/.nm-monitor"
+out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$home_rebound" "$MON" status 2>&1) \
+  || fail "status with a rebound recorded pane failed"
+case "$out" in
+  *"binding not live"*) pass "status rejects a pane outside its recorded binding" ;;
+  *) fail "status reported a rebound pane as live: $out" ;;
+esac
+PATH="$FAKEBIN:$PATH" FM_HOME="$home_rebound" "$MON" ensure >/dev/null 2>&1 \
+  || fail "ensure with a rebound recorded pane failed"
+case "$(cat "$home_rebound/state/.nm-monitor")" in
+  *w1:p-new*) pass "ensure replaces a pane outside its recorded tab binding" ;;
+  *) fail "ensure reused a pane whose binding changed: $(cat "$home_rebound/state/.nm-monitor")" ;;
+esac
+case "$(cat "$FAKE_STATE/calls.log")" in
+  *"tab create"*) pass "ensure created a monitor after rejecting the rebound pane" ;;
+  *) fail "ensure did not replace the rebound pane" ;;
+esac
+
+# --- ensure: launcher identity selects among duplicate home labels ------------
+export FAKE_STATE="$TMP_ROOT/fs-launcher"
+mkdir -p "$FAKE_STATE"
+: > "$FAKE_STATE/calls.log"
+printf '{"server":{"running":true}}' > "$FAKE_STATE/status.json"
+printf '{"sessions":[{"name":"default","running":true,"socket_path":"/tmp/fm-nm-monitor.sock"}]}' > "$FAKE_STATE/sessions.json"
+printf '{"result":{"workspaces":[{"workspace_id":"w-other","label":"firstmate"},{"workspace_id":"w-home","label":"firstmate"}]}}' > "$FAKE_STATE/workspaces.json"
+printf '{"result":{"tabs":[]}}' > "$FAKE_STATE/tabs.json"
+printf '{"result":{"panes":[]}}' > "$FAKE_STATE/panes.json"
+printf '{"w9:p-launcher":{"result":{"pane":{"pane_id":"w9:p-launcher","tab_id":"t-launcher","workspace_id":"w-home"}}}}' > "$FAKE_STATE/pane-get.json"
+printf '{"t-launcher":{"result":{"tab":{"tab_id":"t-launcher","workspace_id":"w-home"}}}}' > "$FAKE_STATE/tab-get.json"
+write_fake_herdr
+home_launcher="$TMP_ROOT/home-launcher"
+make_home "$home_launcher"
+PATH="$FAKEBIN:$PATH" FM_HOME="$home_launcher" HERDR_ENV=1 HERDR_PANE_ID=w9:p-launcher \
+  HERDR_SESSION=default HERDR_SOCKET_PATH=/tmp/fm-nm-monitor.sock "$MON" ensure >/dev/null 2>&1 \
+  || fail "ensure from a launcher with duplicate workspace labels failed"
+case "$(cat "$home_launcher/state/.nm-monitor")" in
+  $'default\nw-home\n'*) pass "ensure placed the monitor in the launcher's exact workspace" ;;
+  *) fail "ensure skipped or chose the wrong duplicate-label workspace: $(cat "$home_launcher/state/.nm-monitor")" ;;
 esac
 
 # --- ensure: concurrent convergence creates one monitor tab ------------------

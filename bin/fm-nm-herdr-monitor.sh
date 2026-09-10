@@ -11,12 +11,10 @@
 # never created: when it does not exist this script changes nothing, so homes
 # that never use Herdr and task placement are unchanged.
 #
-# Convergence: `ensure` is idempotent. It reuses the recorded endpoint when its
-# exact pane is still present, otherwise adopts the single live `nm-monitor`
-# tab in the home workspace, closes surplus husk duplicates by exact id, and
-# creates one fresh tab only when none is live. Creation uses --no-focus and
-# never moves focus. The record at state/.nm-monitor holds exact session,
-# workspace, tab, and pane ids; labels and tokens are never authority.
+# Convergence: `ensure` is idempotent.
+# It reuses the recorded endpoint when its pane, tab, and workspace binding is still exact, otherwise adopts the single live `nm-monitor` tab in the home workspace, closes surplus husk duplicates by exact id, and creates one fresh tab only when none is live.
+# Creation uses --no-focus and never moves focus.
+# The record at state/.nm-monitor holds exact session, workspace, tab, and pane ids; labels and tokens are never authority.
 #
 # Display: `render` enumerates this home's state/*.meta ship tasks on every
 # refresh and reads each through bin/fm-crew-state.sh, so current and future
@@ -124,6 +122,16 @@ fm_nm_monitor_pane_present() {
   [ "$pid" = "$pane" ]
 }
 
+fm_nm_monitor_pane_bound() {
+  local session=$1 wsid=$2 tab=$3 pane=$4 out
+  out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -e --arg pane "$pane" --arg tab "$tab" --arg wsid "$wsid" '
+    .result.pane.pane_id == $pane
+    and .result.pane.tab_id == $tab
+    and .result.pane.workspace_id == $wsid
+  ' >/dev/null 2>&1
+}
+
 fm_nm_monitor_pane_is_husk() {
   local session=$1 pane=$2 out code
   out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
@@ -150,7 +158,14 @@ fm_nm_monitor_refresh_view_if_stale() {
 }
 
 fm_nm_monitor_home_workspace_id() {
-  local session=$1 label=$2 out count wsid
+  local session=$1 label=$2 launcher_status out count wsid
+  if fm_backend_herdr_launcher_identity "$session" 2>/dev/null; then
+    printf '%s' "$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID"
+    return 0
+  else
+    launcher_status=$?
+  fi
+  [ "$launcher_status" -eq 2 ] || return 1
   out=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
   count=$(printf '%s' "$out" | jq --arg want "$label" \
     '[.result.workspaces[]? | select(.label == $want)] | length' 2>/dev/null) || return 1
@@ -264,10 +279,10 @@ fm_nm_monitor_status() {
   fi
   session=$FM_NM_MON_SESSION; ws=$FM_NM_MON_WS; tab=$FM_NM_MON_TAB; pane=$FM_NM_MON_PANE
   if command -v herdr >/dev/null 2>&1 \
-    && fm_nm_monitor_pane_present "$session" "$pane" 2>/dev/null; then
+    && fm_nm_monitor_pane_bound "$session" "$ws" "$tab" "$pane" 2>/dev/null; then
     printf 'monitor: live session=%s workspace=%s tab=%s pane=%s\n' "$session" "$ws" "$tab" "$pane"
   else
-    printf 'monitor: recorded session=%s workspace=%s tab=%s pane=%s (pane not present)\n' "$session" "$ws" "$tab" "$pane"
+    printf 'monitor: recorded session=%s workspace=%s tab=%s pane=%s (binding not live)\n' "$session" "$ws" "$tab" "$pane"
   fi
 }
 
@@ -275,7 +290,7 @@ fm_nm_monitor_ensure_locked() {
   local session=$1 wsid=$2 interval=$3 tabs tab pane kept extras out new_tab new_pane cmd
   if fm_nm_monitor_record_read 2>/dev/null; then
     if [ "$FM_NM_MON_SESSION" = "$session" ] && [ "$FM_NM_MON_WS" = "$wsid" ] \
-      && fm_nm_monitor_pane_present "$session" "$FM_NM_MON_PANE" 2>/dev/null; then
+      && fm_nm_monitor_pane_bound "$session" "$FM_NM_MON_WS" "$FM_NM_MON_TAB" "$FM_NM_MON_PANE" 2>/dev/null; then
       fm_nm_monitor_refresh_view_if_stale "$session" "$FM_NM_MON_PANE" "$interval"
       printf 'monitor: reusing live pane %s:%s\n' "$session" "$FM_NM_MON_PANE"
       return 0
@@ -353,7 +368,7 @@ fm_nm_monitor_ensure() {
     return 0
   fi
   wsid=$(fm_nm_monitor_home_workspace_id "$session" "$label") || {
-    echo "warning: fm-nm-herdr-monitor: home workspace '$label' not found in session '$session'; leaving non-Herdr layout unchanged" >&2
+    echo "warning: fm-nm-herdr-monitor: home workspace '$label' could not be resolved in session '$session'; leaving non-Herdr layout unchanged" >&2
     return 0
   }
   # shellcheck source=bin/fm-wake-lib.sh
